@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import centaur_data_lens.cli as cli
@@ -139,7 +140,11 @@ def test_wizard_ask_and_save_helpers(monkeypatch, google_export: Path, tmp_path:
         assert output.exists()
 
 
-def test_ask_once_prints_validated_answer(monkeypatch, google_export: Path) -> None:
+def test_ask_once_prints_every_citation_before_long_claim_text(
+    monkeypatch: pytest.MonkeyPatch,
+    google_export: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     class LocalAdapter:
         name = "local-test"
         model = "test"
@@ -165,13 +170,17 @@ def test_ask_once_prints_validated_answer(monkeypatch, google_export: Path) -> N
                     categories=("account_activity",),
                 ),
                 AIAnswer(
-                    answer="Synthetic answer",
                     claims=[
                         AIClaim(
-                            text="Synthetic claim",
+                            text="x" * 3_000,
                             kind=AIClaimKind.INFERENCE,
-                            source_ids=["synthetic-record"],
-                        )
+                            record_ids=["first-record"],
+                        ),
+                        AIClaim(
+                            text="Second claim",
+                            kind=AIClaimKind.OBSERVED,
+                            record_ids=["second-record"],
+                        ),
                     ],
                 ),
             ),
@@ -184,6 +193,13 @@ def test_ask_once_prints_validated_answer(monkeypatch, google_export: Path) -> N
             endpoint=None,
             allow_cloud=False,
         )
+    output = capsys.readouterr().out
+    lines = output.splitlines()
+    first_citation_line = next(index for index, line in enumerate(lines) if "first-record" in line)
+    first_text_line = next(index for index, line in enumerate(lines) if set(line) == {"x"})
+    assert first_citation_line < first_text_line
+    assert output.count("x") >= 3_000
+    assert output.index("second-record") < output.index("Second claim")
 
 
 def test_select_paths_uses_explicit_platform(monkeypatch, google_export: Path) -> None:

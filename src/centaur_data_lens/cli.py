@@ -46,8 +46,13 @@ class ReportFormatOption(StrEnum):
     JSON = "json"
 
 
-def _safe_print(value: object, *, style: str | None = None) -> None:
-    text = Text(sanitize_terminal(value))
+def _safe_print(
+    value: object,
+    *,
+    style: str | None = None,
+    limit: int = 2_000,
+) -> None:
+    text = Text(sanitize_terminal(value, limit=limit))
     if style:
         text.stylize(style)
     console.print(text)
@@ -169,7 +174,13 @@ def _ask_once(
         allow_cloud=confirmed,
     )
     console.print()
-    _safe_print(answer.answer)
+    for claim in answer.claims:
+        _safe_print(
+            f"[{claim.kind.value}] records: {', '.join(claim.record_ids)}",
+            style="bold",
+            limit=4_000,
+        )
+        _safe_print(claim.text, limit=4_000)
 
 
 def _select_paths(platform_id: str) -> list[SourceSpec]:

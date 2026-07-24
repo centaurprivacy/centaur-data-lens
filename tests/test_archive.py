@@ -154,3 +154,22 @@ def test_malformed_url_has_no_hostname() -> None:
         value={"title": "malformed URL", "titleUrl": "http://["},
     )
     assert record.hostname is None
+
+
+def test_deeply_nested_json_fails_centrally_for_zip_and_directory(tmp_path: Path) -> None:
+    root = tmp_path / "extracted"
+    activity = root / "Takeout" / "My Activity" / "Search"
+    activity.mkdir(parents=True)
+    depth = 2_000
+    document = "[" + '{"nested":' * depth + '{"title":"deep"}' + "}" * depth + "]"
+    (activity / "MyActivity.json").write_text(document, encoding="utf-8")
+    archive_path = tmp_path / "deep.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("Takeout/My Activity/Search/MyActivity.json", document)
+
+    for source in (root, archive_path):
+        with (
+            ArchiveReader([source]) as reader,
+            pytest.raises(ArchiveSafetyError, match="malformed"),
+        ):
+            list(get_platform("google").iter_records(reader))

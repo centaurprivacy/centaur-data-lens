@@ -66,4 +66,3 @@ uv run pytest
 
 Only synthetic export fixtures may be committed. Never post an archive, API
 key, unredacted diagnostic, or report in an issue.
-Explore the personal data disclosed in your platform exports — locally and securely

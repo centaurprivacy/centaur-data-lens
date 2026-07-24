@@ -93,6 +93,17 @@ def _first_non_whitespace(reader: ArchiveReader, entry: ArchiveEntry) -> bytes:
 def iter_json_records(
     reader: ArchiveReader, entry: ArchiveEntry
 ) -> Iterator[tuple[str, Mapping[str, Any]]]:
+    try:
+        yield from _iter_json_records(reader, entry)
+    except ArchiveSafetyError:
+        raise
+    except (ijson.JSONError, UnicodeError, ValueError, RecursionError) as exc:
+        raise ArchiveSafetyError("A selected JSON export file is malformed.") from exc
+
+
+def _iter_json_records(
+    reader: ArchiveReader, entry: ArchiveEntry
+) -> Iterator[tuple[str, Mapping[str, Any]]]:
     first = _first_non_whitespace(reader, entry)
     if first == b"[":
         with reader.open_entry(entry) as stream:

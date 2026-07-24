@@ -85,7 +85,7 @@ class AIClaim(BaseModel):
 
     text: str = Field(max_length=4_000)
     kind: AIClaimKind
-    source_ids: list[str] = Field(default_factory=list, max_length=100)
+    record_ids: list[str] = Field(default_factory=list, max_length=100)
 
     @field_validator("text")
     @classmethod
@@ -99,7 +99,6 @@ class AIClaim(BaseModel):
 class AIAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    answer: str = Field(max_length=20_000)
     claims: list[AIClaim] = Field(max_length=50)
 
 

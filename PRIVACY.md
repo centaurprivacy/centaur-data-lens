@@ -17,7 +17,7 @@ encryption and protect the original export.
 
 Reports and diagnostics are saved only to a path the user chooses. Reports can
 contain sensitive derived information and cited evidence. Diagnostics contain
-schema names, types, counts, and salted path hashes—not record values.
+schema version and per-platform category counts—not record values or paths.
 
 ## Optional AI
 

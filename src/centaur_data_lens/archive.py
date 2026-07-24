@@ -100,19 +100,18 @@ class _ZipSource(_ArchiveSource):
 
     @contextmanager
     def open(self, entry: ArchiveEntry) -> Iterator[IO[bytes]]:
+        members = self._zip.infolist()
+        if entry._member_index < 0 or entry._member_index >= len(members):
+            raise ArchiveSafetyError("Archive entry identity is invalid.")
+        info = members[entry._member_index]
+        if info.filename != entry._member_name:
+            raise ArchiveSafetyError("Archive entry identity changed unexpectedly.")
         try:
-            members = self._zip.infolist()
-            if entry._member_index < 0 or entry._member_index >= len(members):
-                raise ArchiveSafetyError("Archive entry identity is invalid.")
-            info = members[entry._member_index]
-            if info.filename != entry._member_name:
-                raise ArchiveSafetyError("Archive entry identity changed unexpectedly.")
-            with self._zip.open(info, "r") as handle:
-                yield handle
-        except ArchiveSafetyError:
-            raise
+            handle = self._zip.open(info, "r")
         except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
             raise ArchiveSafetyError("Unable to read an archive entry safely.") from exc
+        with handle:
+            yield handle
 
     def close(self) -> None:
         self._zip.close()
