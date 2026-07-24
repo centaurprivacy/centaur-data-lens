@@ -228,3 +228,33 @@ def test_select_paths_uses_explicit_platform(monkeypatch, google_export: Path) -
         lambda platform: [SourceSpec(platform, google_export)],
     )
     cli.run_wizard()
+
+
+@pytest.mark.parametrize(
+    "format_path",
+    [
+        lambda path: f"{path} ",
+        lambda path: f"  {path}  ",
+        lambda path: f"'{path}'",
+        lambda path: f'  "{path}"  ',
+    ],
+)
+def test_select_paths_accepts_pasted_path_formatting(
+    monkeypatch,
+    google_export: Path,
+    format_path,
+) -> None:
+    monkeypatch.setattr(
+        cli.questionary,
+        "path",
+        lambda *args, **kwargs: _Prompt(format_path(google_export)),
+    )
+    monkeypatch.setattr(
+        cli.questionary,
+        "confirm",
+        lambda *args, **kwargs: _Prompt(False),
+    )
+
+    specs = cli._select_paths("google")
+
+    assert specs == [SourceSpec("google", google_export)]

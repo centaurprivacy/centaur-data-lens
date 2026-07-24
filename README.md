@@ -23,14 +23,18 @@ the tool with a sensitive export.
 
 Python 3.11 or newer is required.
 
+Until the first PyPI release, run Centaur Data Lens from a source checkout:
+
 ```bash
-uvx centaur-data-lens
+git clone https://github.com/centaurprivacy/centaur-data-lens.git
+cd centaur-data-lens
+uv run centaur-data-lens
 ```
 
 For a persistent installation:
 
 ```bash
-uv tool install centaur-data-lens
+uv tool install .
 centaur-data-lens
 ```
 

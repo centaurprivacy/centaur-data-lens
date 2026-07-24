@@ -192,14 +192,29 @@ def _select_paths(platform_id: str) -> list[SourceSpec]:
         ).ask()
         if not raw_path:
             break
-        path = Path(raw_path).expanduser()
-        if not path.exists():
+        path = _existing_prompt_path(raw_path)
+        if path is None:
             _safe_print("That path does not exist.", style="red")
             continue
         specs.append(SourceSpec(platform=platform_id, path=path))
         if not questionary.confirm("Add another ZIP part or directory?", default=False).ask():
             break
     return specs
+
+
+def _existing_prompt_path(raw_path: str) -> Path | None:
+    candidates = [raw_path]
+    trimmed = raw_path.strip()
+    if trimmed != raw_path:
+        candidates.append(trimmed)
+    if len(trimmed) >= 2 and trimmed[0] == trimmed[-1] and trimmed[0] in {"'", '"'}:
+        candidates.append(trimmed[1:-1])
+
+    for candidate in candidates:
+        path = Path(candidate).expanduser()
+        if path.exists():
+            return path
+    return None
 
 
 def _wizard_ask(session: AnalysisSession) -> None:
