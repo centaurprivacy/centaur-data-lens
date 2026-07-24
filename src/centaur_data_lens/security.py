@@ -3,10 +3,10 @@ from __future__ import annotations
 import html
 import json
 import os
-import re
 import secrets
 import shutil
 import stat
+import string
 import tempfile
 import time
 from contextlib import suppress
@@ -15,15 +15,32 @@ from typing import Any
 
 from centaur_data_lens.errors import DataLensError
 
-_CONTROL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+_TERMINAL_CONTROL_TRANSLATION = dict.fromkeys(
+    (
+        *range(0x00, 0x09),
+        0x0B,
+        0x0C,
+        *range(0x0E, 0x20),
+        *range(0x7F, 0xA0),
+        *range(0x202A, 0x202F),
+        *range(0x2066, 0x206A),
+    ),
+    "\N{REPLACEMENT CHARACTER}",
+)
+_MARKDOWN_PUNCTUATION = frozenset(string.punctuation)
 _SESSION_MARKER = ".centaur-data-lens-session"
 
 
 def sanitize_terminal(value: object, *, limit: int = 2_000) -> str:
     """Remove terminal controls, bidi overrides, and Rich markup ambiguity."""
     text = str(value)
-    text = _CONTROL_RE.sub("\N{REPLACEMENT CHARACTER}", text)
-    return text[:limit]
+    return text.translate(_TERMINAL_CONTROL_TRANSLATION)[:limit]
+
+
+def markdown_text(value: object, *, limit: int = 2_000) -> str:
+    """Render untrusted text inert in CommonMark and single-line contexts."""
+    text = " ".join(sanitize_terminal(value, limit=limit).splitlines())
+    return "".join(f"\\{char}" if char in _MARKDOWN_PUNCTUATION else char for char in text)
 
 
 def safe_embedded_json(value: Any) -> str:

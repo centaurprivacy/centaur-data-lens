@@ -8,7 +8,7 @@ import centaur_data_lens.cli as cli
 from centaur_data_lens.ai import TransmissionPreview
 from centaur_data_lens.analysis import AnalysisSession, SourceSpec, analyze_sources
 from centaur_data_lens.cli import app
-from centaur_data_lens.models import AIAnswer, AIClaim, ClaimKind
+from centaur_data_lens.models import AIAnswer, AIClaim, AIClaimKind
 
 runner = CliRunner()
 
@@ -169,8 +169,8 @@ def test_ask_once_prints_validated_answer(monkeypatch, google_export: Path) -> N
                     claims=[
                         AIClaim(
                             text="Synthetic claim",
-                            kind=ClaimKind.INFERENCE,
-                            source_ids=[],
+                            kind=AIClaimKind.INFERENCE,
+                            source_ids=["synthetic-record"],
                         )
                     ],
                 ),

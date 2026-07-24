@@ -4,12 +4,17 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ClaimKind(StrEnum):
     OBSERVED = "observed"
     CALCULATED = "calculated"
+    INFERENCE = "inference"
+
+
+class AIClaimKind(StrEnum):
+    OBSERVED = "observed"
     INFERENCE = "inference"
 
 
@@ -76,14 +81,26 @@ class PrivacySnapshot(BaseModel):
 
 
 class AIClaim(BaseModel):
-    text: str
-    kind: ClaimKind
-    source_ids: list[str] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(max_length=4_000)
+    kind: AIClaimKind
+    source_ids: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("text")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Claim text cannot be empty.")
+        return stripped
 
 
 class AIAnswer(BaseModel):
-    answer: str
-    claims: list[AIClaim]
+    model_config = ConfigDict(extra="forbid")
+
+    answer: str = Field(max_length=20_000)
+    claims: list[AIClaim] = Field(max_length=50)
 
 
 JsonObject = dict[str, Any]

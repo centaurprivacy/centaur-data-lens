@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from centaur_data_lens.analysis import AnalysisSession, SourceSpec, analyze_sources
 
 
@@ -34,6 +36,15 @@ def test_search_returns_relevant_record(google_export: Path) -> None:
         results = session.search("privacy tools")
         assert results
         assert "privacy tools" in (results[0].title or "")
+
+
+def test_context_manager_removes_session_after_exception() -> None:
+    database_path: Path | None = None
+    with pytest.raises(RuntimeError, match="synthetic failure"), AnalysisSession() as session:
+        database_path = session.database_path
+        raise RuntimeError("synthetic failure")
+    assert database_path is not None
+    assert not database_path.exists()
 
 
 def test_diagnostics_contain_counts_not_values(google_export: Path) -> None:

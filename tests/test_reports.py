@@ -24,13 +24,20 @@ def malicious_snapshot() -> PrivacySnapshot:
         coverage=[],
         common_hostnames=[],
         overlapping_hostnames=[],
+        overlapping_devices=[
+            "![tracker](https://attacker.invalid/device)\n# injected\u2028## injected again"
+        ],
+        overlapping_services=["<img src=https://attacker.invalid/service>"],
         evidence=[
             EvidenceItem(
                 record_id="abc",
                 platform="google",
                 category="activity",
-                title='</script><img src=x onerror="alert(1)">\x1b]8;;https://evil.invalid\x07',
-                source="../../secret",
+                title=(
+                    "![tracker](https://attacker.invalid/pixel)\n"
+                    '</script><img src=x onerror="alert(1)">\x1b]8;;https://evil.invalid\x07'
+                ),
+                source="`escape`\n![tracker](https://attacker.invalid/source)",
                 claim_kind=ClaimKind.OBSERVED,
             )
         ],
@@ -59,6 +66,18 @@ def test_secure_report_permissions(tmp_path: Path) -> None:
     assert output.exists()
     if os.name == "posix":
         assert output.stat().st_mode & 0o777 == 0o600
+
+
+def test_markdown_neutralizes_all_untrusted_fields() -> None:
+    rendered = render_report(malicious_snapshot(), "markdown")
+    assert "![tracker](" not in rendered
+    assert "<img src=" not in rendered
+    assert "</script>" not in rendered
+    assert "\n# injected" not in rendered
+    assert "\u2028" not in rendered
+    assert "`escape`" not in rendered
+    assert "\\!\\[tracker\\]\\(https\\:\\/\\/attacker\\.invalid\\/pixel\\)" in rendered
+    assert '\\<img src\\=x onerror\\=\\"alert\\(1\\)\\"\\>' in rendered
 
 
 def test_refuses_symlink_output(tmp_path: Path) -> None:

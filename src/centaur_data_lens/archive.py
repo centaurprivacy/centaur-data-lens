@@ -34,6 +34,7 @@ class ArchiveEntry:
     nested_archive: bool = False
     _source_index: int = field(repr=False, default=0)
     _member_name: str = field(repr=False, default="")
+    _member_index: int = field(repr=False, default=-1)
 
 
 class _ArchiveSource:
@@ -75,10 +76,14 @@ class _ZipSource(_ArchiveSource):
         self._id = _source_id(path)
 
     def entries(self, source_index: int) -> Iterator[ArchiveEntry]:
-        for info in self._zip.infolist():
+        normalized_paths: set[str] = set()
+        for member_index, info in enumerate(self._zip.infolist()):
             if info.is_dir():
                 continue
             safe_path = _safe_member_path(info.filename)
+            if safe_path in normalized_paths:
+                raise ArchiveSafetyError("Archive contains duplicate normalized member paths.")
+            normalized_paths.add(safe_path)
             mode = info.external_attr >> 16
             yield ArchiveEntry(
                 source_id=self._id,
@@ -90,13 +95,22 @@ class _ZipSource(_ArchiveSource):
                 nested_archive=Path(safe_path).suffix.lower() in _NESTED_ARCHIVE_SUFFIXES,
                 _source_index=source_index,
                 _member_name=info.filename,
+                _member_index=member_index,
             )
 
     @contextmanager
     def open(self, entry: ArchiveEntry) -> Iterator[IO[bytes]]:
         try:
-            with self._zip.open(entry._member_name, "r") as handle:
+            members = self._zip.infolist()
+            if entry._member_index < 0 or entry._member_index >= len(members):
+                raise ArchiveSafetyError("Archive entry identity is invalid.")
+            info = members[entry._member_index]
+            if info.filename != entry._member_name:
+                raise ArchiveSafetyError("Archive entry identity changed unexpectedly.")
+            with self._zip.open(info, "r") as handle:
                 yield handle
+        except ArchiveSafetyError:
+            raise
         except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
             raise ArchiveSafetyError("Unable to read an archive entry safely.") from exc
 

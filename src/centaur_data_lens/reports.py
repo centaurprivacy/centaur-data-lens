@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 from centaur_data_lens.models import PrivacySnapshot
-from centaur_data_lens.security import safe_embedded_json, secure_write_text
+from centaur_data_lens.security import markdown_text, safe_embedded_json, secure_write_text
 
 ReportFormat = Literal["html", "markdown", "json"]
 
@@ -131,7 +131,7 @@ def render_markdown(snapshot: PrivacySnapshot) -> str:
         "",
         "> This report covers only supported records disclosed in the selected exports.",
         "",
-        f"- Platforms: {', '.join(snapshot.platforms)}",
+        f"- Platforms: {', '.join(markdown_text(item) for item in snapshot.platforms)}",
         f"- Normalized records: {snapshot.total_records:,}",
         "",
         "## Coverage",
@@ -144,8 +144,8 @@ def render_markdown(snapshot: PrivacySnapshot) -> str:
             "| "
             + " | ".join(
                 [
-                    coverage_item.platform,
-                    coverage_item.category,
+                    markdown_text(coverage_item.platform),
+                    markdown_text(coverage_item.category),
                     str(coverage_item.record_count),
                     coverage_item.earliest.isoformat() if coverage_item.earliest else "—",
                     coverage_item.latest.isoformat() if coverage_item.latest else "—",
@@ -154,21 +154,21 @@ def render_markdown(snapshot: PrivacySnapshot) -> str:
             + " |"
         )
     lines.extend(["", "## Cross-platform hostname overlap", ""])
-    lines.extend(f"- `{hostname}`" for hostname in snapshot.overlapping_hostnames)
+    lines.extend(f"- {markdown_text(hostname)}" for hostname in snapshot.overlapping_hostnames)
     if not snapshot.overlapping_hostnames:
         lines.append("- No overlap observed in supported categories.")
     lines.extend(["", "### Devices", ""])
-    lines.extend(f"- {device}" for device in snapshot.overlapping_devices)
+    lines.extend(f"- {markdown_text(device)}" for device in snapshot.overlapping_devices)
     if not snapshot.overlapping_devices:
         lines.append("- No device overlap observed.")
     lines.extend(["", "### Services", ""])
-    lines.extend(f"- {service}" for service in snapshot.overlapping_services)
+    lines.extend(f"- {markdown_text(service)}" for service in snapshot.overlapping_services)
     if not snapshot.overlapping_services:
         lines.append("- No service overlap observed.")
     lines.extend(["", "## Coverage omissions", ""])
     for platform, omissions in snapshot.omissions.items():
-        lines.append(f"### {platform}")
-        lines.extend(f"- {item}" for item in omissions)
+        lines.append(f"### {markdown_text(platform)}")
+        lines.extend(f"- {markdown_text(item)}" for item in omissions)
         lines.append("")
     lines.extend(["## Cited evidence", ""])
     for evidence_item in snapshot.evidence:
@@ -176,9 +176,10 @@ def render_markdown(snapshot: PrivacySnapshot) -> str:
             evidence_item.timestamp.isoformat() if evidence_item.timestamp else "time unavailable"
         )
         lines.append(
-            f"- **{evidence_item.platform}/{evidence_item.category}** — "
-            f"{evidence_item.title} ({when})  \n"
-            f"  Source: `{evidence_item.source}`"
+            f"- **{markdown_text(evidence_item.platform)}/"
+            f"{markdown_text(evidence_item.category)}** — "
+            f"{markdown_text(evidence_item.title)} ({when})  \n"
+            f"  Source: {markdown_text(evidence_item.source)}"
         )
     return "\n".join(lines).rstrip() + "\n"
 

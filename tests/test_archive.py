@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import stat
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -10,6 +12,7 @@ import centaur_data_lens.platforms.base as platform_base
 from centaur_data_lens.archive import ArchiveLimits, ArchiveReader
 from centaur_data_lens.errors import ArchiveSafetyError, UnsupportedExportError
 from centaur_data_lens.platforms import get_platform
+from centaur_data_lens.platforms.base import normalize_record
 
 
 def test_rejects_path_traversal(tmp_path: Path) -> None:
@@ -17,6 +20,24 @@ def test_rejects_path_traversal(tmp_path: Path) -> None:
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("../Takeout/My Activity/bad.json", "[]")
     with ArchiveReader([path]) as reader, pytest.raises(ArchiveSafetyError):
+        _ = reader.entries
+
+
+def test_rejects_duplicate_normalized_zip_member_paths(tmp_path: Path) -> None:
+    path = tmp_path / "duplicate.zip"
+    member = "Takeout/My Activity/Search/MyActivity.json"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(member, "[]")
+            archive.writestr(member, b"x" * 202)
+    with (
+        ArchiveReader(
+            [path],
+            limits=ArchiveLimits(max_structured_file_bytes=10),
+        ) as reader,
+        pytest.raises(ArchiveSafetyError, match="duplicate"),
+    ):
         _ = reader.entries
 
 
@@ -97,3 +118,39 @@ def test_streams_large_object_shaped_json(
     with ArchiveReader([google_export]) as reader:
         records = list(get_platform("google").iter_records(reader))
     assert len(records) == 5
+
+
+def test_streams_every_top_level_record_array_after_scalar_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(platform_base, "_MAX_OBJECT_DOCUMENT", 1)
+    path = tmp_path / "large-object.zip"
+    document = {
+        "metadata": "v1",
+        "records": [{"title": "first", "time": "2026-01-01T00:00:00Z"}],
+        "additional": [{"title": "second", "time": "2026-01-02T00:00:00Z"}],
+    }
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "Takeout/My Activity/Search/MyActivity.json",
+            json.dumps(document),
+        )
+    with ArchiveReader([path]) as reader:
+        records = list(get_platform("google").iter_records(reader))
+    assert [record.title for record in records] == ["first", "second"]
+    assert [record.sources[0].pointer for record in records] == [
+        "/records/0",
+        "/additional/0",
+    ]
+
+
+def test_malformed_url_has_no_hostname() -> None:
+    record = normalize_record(
+        platform="google",
+        category="activity",
+        path="Takeout/My Activity/Search/MyActivity.json",
+        source_id="synthetic",
+        pointer="/0",
+        value={"title": "malformed URL", "titleUrl": "http://["},
+    )
+    assert record.hostname is None

@@ -30,6 +30,8 @@ only locally selected normalized records and have no tools.
 
 Each process creates a random, user-only temporary directory carrying a marker.
 SQLite uses `secure_delete` and the DELETE journal mode. Normal shutdown,
-exceptions, and signals close and remove the session; marked sessions older
-than 24 hours are removed on a later startup. See `PRIVACY.md` for the limits of
-best-effort deletion.
+handled cancellation, and exceptions unwinding through the session context close
+and remove it. Abrupt termination, including `SIGKILL` or an unhandled
+`SIGTERM`, can leave the marked session directory behind. On a later startup,
+the CLI removes marked sessions older than 24 hours. See `PRIVACY.md` for the
+limits of best-effort deletion.

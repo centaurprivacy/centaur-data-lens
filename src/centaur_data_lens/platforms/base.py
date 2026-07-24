@@ -104,7 +104,7 @@ def iter_json_records(
         return
     if first == b"{":
         if entry.size > _MAX_OBJECT_DOCUMENT:
-            yield from _iter_large_object_array(reader, entry)
+            yield from _iter_large_object_arrays(reader, entry)
             return
         with reader.open_entry(entry) as stream:
             try:
@@ -116,35 +116,68 @@ def iter_json_records(
     raise ArchiveSafetyError("A selected JSON file does not contain an object or array.")
 
 
-def _iter_large_object_array(
+def _iter_large_object_arrays(
     reader: ArchiveReader, entry: ArchiveEntry
 ) -> Iterator[tuple[str, Mapping[str, Any]]]:
     root_key: str | None = None
+    active_array_key: str | None = None
+    item_builder: Any | None = None
+    item_depth = 0
+    item_index = 0
+    found_array = False
     with reader.open_entry(entry) as stream:
         try:
             for prefix, event, value in ijson.parse(stream):
-                if prefix == "" and event == "map_key":
-                    root_key = str(value)
-                    break
+                if active_array_key is None:
+                    if prefix == "" and event == "map_key":
+                        root_key = str(value)
+                        continue
+                    if root_key is None:
+                        continue
+                    if event == "start_array":
+                        active_array_key = root_key
+                        root_key = None
+                        item_index = 0
+                        found_array = True
+                    else:
+                        root_key = None
+                    continue
+
+                if item_builder is None:
+                    if event == "end_array":
+                        active_array_key = None
+                        continue
+                    item_builder = ijson.ObjectBuilder()
+                    item_builder.event(event, value)
+                    if event in {"start_array", "start_map"}:
+                        item_depth = 1
+                        continue
+                    item = item_builder.value
+                    yield from _walk_candidates(
+                        item,
+                        f"/{_escape_pointer(active_array_key)}/{item_index}",
+                    )
+                    item_index += 1
+                    item_builder = None
+                    continue
+
+                item_builder.event(event, value)
+                if event in {"start_array", "start_map"}:
+                    item_depth += 1
+                elif event in {"end_array", "end_map"}:
+                    item_depth -= 1
+                if item_depth == 0:
+                    item = item_builder.value
+                    yield from _walk_candidates(
+                        item,
+                        f"/{_escape_pointer(active_array_key)}/{item_index}",
+                    )
+                    item_index += 1
+                    item_builder = None
         except (ijson.JSONError, UnicodeError, ValueError) as exc:
             raise ArchiveSafetyError("A selected JSON export file is malformed.") from exc
-    if root_key is None:
-        raise ArchiveSafetyError("A large JSON object has no streamable record collection.")
-    escaped = root_key.replace(".", "\\.")
-    with reader.open_entry(entry) as stream:
-        try:
-            found = False
-            for index, item in enumerate(ijson.items(stream, f"{escaped}.item")):
-                found = True
-                yield from _walk_candidates(item, f"/{_escape_pointer(root_key)}/{index}")
-            if not found:
-                raise ArchiveSafetyError(
-                    "A large JSON object has no streamable top-level record array."
-                )
-        except ArchiveSafetyError:
-            raise
-        except (ijson.JSONError, UnicodeError, ValueError) as exc:
-            raise ArchiveSafetyError("A selected JSON export file is malformed.") from exc
+    if not found_array:
+        raise ArchiveSafetyError("A large JSON object has no streamable top-level record array.")
 
 
 def _looks_like_record(value: Mapping[str, Any]) -> bool:
@@ -242,10 +275,14 @@ def _hostname(value: Mapping[str, Any]) -> str | None:
     url = _first_scalar(value, _URL_KEYS)
     if not url:
         return None
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            return None
+        hostname = parsed.hostname
+    except ValueError:
         return None
-    return parsed.hostname.lower() if parsed.hostname else None
+    return hostname.lower() if hostname else None
 
 
 def _sensitivity(category: str, title: str | None) -> set[str]:

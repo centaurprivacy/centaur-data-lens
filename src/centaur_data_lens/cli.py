@@ -170,13 +170,6 @@ def _ask_once(
     )
     console.print()
     _safe_print(answer.answer)
-    if answer.claims:
-        console.print(Text("Claims", style="bold"))
-        for claim in answer.claims:
-            _safe_print(
-                f"• [{claim.kind.value}] {claim.text} "
-                f"(sources: {', '.join(claim.source_ids) or 'none'})"
-            )
 
 
 def _select_paths(platform_id: str) -> list[SourceSpec]:
