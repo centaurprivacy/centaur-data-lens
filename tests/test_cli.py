@@ -233,10 +233,10 @@ def test_select_paths_uses_explicit_platform(monkeypatch, google_export: Path) -
 @pytest.mark.parametrize(
     "format_path",
     [
-        lambda path: f"{path} ",
-        lambda path: f"  {path}  ",
-        lambda path: f"'{path}'",
-        lambda path: f'  "{path}"  ',
+        pytest.param(lambda path: f"{path} ", id="trailing-space"),
+        pytest.param(lambda path: f"  {path}  ", id="surrounding-spaces"),
+        pytest.param(lambda path: f"'{path}'", id="single-quotes"),
+        pytest.param(lambda path: f'  "{path}"  ', id="quotes-and-spaces"),
     ],
 )
 def test_select_paths_accepts_pasted_path_formatting(
@@ -258,3 +258,16 @@ def test_select_paths_accepts_pasted_path_formatting(
     specs = cli._select_paths("google")
 
     assert specs == [SourceSpec("google", google_export)]
+
+
+def test_existing_prompt_path_prefers_normalized_windows_alias(
+    monkeypatch,
+    google_export: Path,
+) -> None:
+    pasted_path = Path(f"{google_export} ")
+    existing_paths = {google_export, pasted_path}
+    monkeypatch.setattr(Path, "exists", lambda path: path in existing_paths)
+
+    path = cli._existing_prompt_path(str(pasted_path))
+
+    assert path == google_export

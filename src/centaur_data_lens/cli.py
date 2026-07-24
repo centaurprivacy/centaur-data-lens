@@ -203,12 +203,12 @@ def _select_paths(platform_id: str) -> list[SourceSpec]:
 
 
 def _existing_prompt_path(raw_path: str) -> Path | None:
-    candidates = [raw_path]
     trimmed = raw_path.strip()
-    if trimmed != raw_path:
-        candidates.append(trimmed)
+    candidates = [trimmed]
     if len(trimmed) >= 2 and trimmed[0] == trimmed[-1] and trimmed[0] in {"'", '"'}:
-        candidates.append(trimmed[1:-1])
+        candidates.insert(0, trimmed[1:-1])
+    if raw_path not in candidates:
+        candidates.append(raw_path)
 
     for candidate in candidates:
         path = Path(candidate).expanduser()
