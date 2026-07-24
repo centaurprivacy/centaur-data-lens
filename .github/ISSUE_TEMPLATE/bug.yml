@@ -1,0 +1,23 @@
+name: Redacted bug report
+description: Report a problem without disclosing personal data
+body:
+  - type: checkboxes
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I removed all personal data, API keys, archive contents, and report text.
+          required: true
+        - label: I am not attaching a platform export.
+          required: true
+  - type: dropdown
+    attributes:
+      label: Platform
+      options: [Google, Meta, Other]
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Description
+      description: Describe the behavior without including record values or filenames.
+    validations:
+      required: true
