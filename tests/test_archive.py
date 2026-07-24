@@ -90,6 +90,29 @@ def test_rejects_malformed_json(tmp_path: Path) -> None:
         list(get_platform("google").iter_records(reader))
 
 
+def test_rejects_corrupt_zip_member_crc_safely(tmp_path: Path) -> None:
+    path = tmp_path / "corrupt.zip"
+    member = "Takeout/My Activity/Search/MyActivity.json"
+    payload = b'[ {"title":"safe"} ]'
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr(member, payload)
+    with zipfile.ZipFile(path) as archive:
+        info = archive.getinfo(member)
+
+    with path.open("r+b") as handle:
+        handle.seek(info.header_offset + 26)
+        name_length = int.from_bytes(handle.read(2), "little")
+        extra_length = int.from_bytes(handle.read(2), "little")
+        data_offset = info.header_offset + 30 + name_length + extra_length
+        handle.seek(data_offset + 1)
+        assert handle.read(1) == b" "
+        handle.seek(data_offset + 1)
+        handle.write(b"\t")
+
+    with ArchiveReader([path]) as reader, pytest.raises(ArchiveSafetyError, match="safely"):
+        list(get_platform("google").iter_records(reader))
+
+
 def test_enforces_configurable_entry_limit(google_export: Path) -> None:
     with (
         ArchiveReader(

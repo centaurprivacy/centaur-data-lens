@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import lzma
 import os
 import stat
 import zipfile
+import zlib
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -110,8 +112,20 @@ class _ZipSource(_ArchiveSource):
             handle = self._zip.open(info, "r")
         except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
             raise ArchiveSafetyError("Unable to read an archive entry safely.") from exc
-        with handle:
-            yield handle
+        try:
+            with handle:
+                yield handle
+        except RecursionError:
+            raise
+        except (
+            EOFError,
+            OSError,
+            RuntimeError,
+            lzma.LZMAError,
+            zipfile.BadZipFile,
+            zlib.error,
+        ) as exc:
+            raise ArchiveSafetyError("Unable to read an archive entry safely.") from exc
 
     def close(self) -> None:
         self._zip.close()
