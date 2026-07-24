@@ -387,12 +387,8 @@ def test_gemini_requests_and_reads_structured_output(
     assert isinstance(payload, dict)
     generation_config = payload["generationConfig"]
     assert isinstance(generation_config, dict)
-    response_format = generation_config["responseFormat"]
-    assert isinstance(response_format, dict)
-    text_format = response_format["text"]
-    assert isinstance(text_format, dict)
-    assert text_format["mimeType"] == "application/json"
-    assert_answer_schema(text_format["schema"])
+    assert generation_config["responseMimeType"] == "application/json"
+    assert_answer_schema(generation_config["responseJsonSchema"])
 
 
 @pytest.mark.parametrize(
@@ -504,6 +500,22 @@ def test_gemini_reports_incomplete_structured_output(
     )
 
     with pytest.raises(ModelAdapterError, match=message):
+        gemini.complete(system="s", user="u")
+
+
+def test_gemini_reports_prompt_level_safety_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gemini = GeminiAdapter("synthetic")
+    monkeypatch.setattr(
+        gemini,
+        "_post_json",
+        lambda *args, **kwargs: {
+            "promptFeedback": {"blockReason": "SAFETY"},
+        },
+    )
+
+    with pytest.raises(ModelAdapterError, match="declined"):
         gemini.complete(system="s", user="u")
 
 

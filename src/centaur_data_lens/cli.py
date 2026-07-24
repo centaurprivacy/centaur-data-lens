@@ -425,6 +425,7 @@ def inspect_command(
                 progress=_progress,
             )
             _print_snapshot(session)
+            _print_coverage_and_omissions(session)
     except DataLensError as exc:
         _fail(exc)
 

@@ -56,6 +56,9 @@ def test_inspect_diagnostics_version_and_invalid_source(
     inspected = runner.invoke(app, ["inspect", "google", str(google_export)])
     assert inspected.exit_code == 0
     assert "Privacy snapshot" in inspected.stdout
+    assert "Coverage and omissions" in inspected.stdout
+    assert "account_activity" in inspected.stdout
+    assert "Gmail" in inspected.stdout
 
     diagnostics = tmp_path / "diagnostics.json"
     result = runner.invoke(

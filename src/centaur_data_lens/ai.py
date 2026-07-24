@@ -275,15 +275,20 @@ class GeminiAdapter(_HTTPAdapter):
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": user}]}],
                 "generationConfig": {
-                    "responseFormat": {
-                        "text": {
-                            "mimeType": "application/json",
-                            "schema": _AI_ANSWER_JSON_SCHEMA,
-                        }
-                    }
+                    "responseMimeType": "application/json",
+                    "responseJsonSchema": _AI_ANSWER_JSON_SCHEMA,
                 },
             },
         )
+        prompt_feedback = data.get("promptFeedback")
+        if isinstance(prompt_feedback, dict):
+            block_reason = prompt_feedback.get("blockReason")
+            if (
+                isinstance(block_reason, str)
+                and block_reason
+                and block_reason != "BLOCK_REASON_UNSPECIFIED"
+            ):
+                raise ModelAdapterError("Gemini declined to answer this question.")
         candidates = data.get("candidates")
         if (
             not isinstance(candidates, list)
