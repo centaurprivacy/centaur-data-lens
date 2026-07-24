@@ -140,6 +140,52 @@ def test_wizard_ask_and_save_helpers(monkeypatch, google_export: Path, tmp_path:
         assert output.exists()
 
 
+def test_wizard_routes_snapshot_and_coverage_to_distinct_views(
+    monkeypatch: pytest.MonkeyPatch,
+    google_export: Path,
+) -> None:
+    answers = iter(["google", "analyze", "coverage", "snapshot", "exit"])
+    monkeypatch.setattr(
+        cli.questionary,
+        "select",
+        lambda *args, **kwargs: _Prompt(next(answers)),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_select_paths",
+        lambda platform: [SourceSpec(platform, google_export)],
+    )
+    calls = {"snapshot": 0, "coverage": 0}
+    monkeypatch.setattr(
+        cli,
+        "_print_snapshot",
+        lambda session: calls.__setitem__("snapshot", calls["snapshot"] + 1),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_print_coverage_and_omissions",
+        lambda session: calls.__setitem__("coverage", calls["coverage"] + 1),
+    )
+
+    cli.run_wizard()
+
+    assert calls == {"snapshot": 2, "coverage": 1}
+
+
+def test_coverage_view_includes_excluded_categories(
+    google_export: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        cli._print_coverage_and_omissions(session)
+
+    output = capsys.readouterr().out
+    assert "Coverage and omissions" in output
+    assert "account_activity" in output
+    assert "Gmail" in output
+
+
 def test_ask_once_prints_every_citation_before_long_claim_text(
     monkeypatch: pytest.MonkeyPatch,
     google_export: Path,

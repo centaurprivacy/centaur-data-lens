@@ -105,6 +105,22 @@ def _print_snapshot(session: AnalysisSession) -> None:
     console.print(Text("Privacy snapshot", style="bold"))
     _safe_print(f"Platforms: {', '.join(snapshot.platforms)}")
     _safe_print(f"Normalized records: {snapshot.total_records:,}")
+    console.print(Text("Most common hostnames", style="bold"))
+    if snapshot.common_hostnames:
+        for hostname, count in snapshot.common_hostnames[:10]:
+            _safe_print(f"  • {hostname}: {count:,} records")
+    else:
+        _safe_print("No hostnames observed in supported categories.", style="dim")
+
+
+def _print_coverage_and_omissions(session: AnalysisSession) -> None:
+    snapshot = session.snapshot()
+    console.print()
+    console.print(Text("Coverage and omissions", style="bold"))
+    _safe_print(
+        "Coverage reflects only supported records found in the selected exports.",
+        style="dim",
+    )
     table = Table(show_header=True, header_style="bold")
     table.add_column("Platform")
     table.add_column("Category")
@@ -120,12 +136,35 @@ def _print_snapshot(session: AnalysisSession) -> None:
             item.latest.date().isoformat() if item.latest else "—",
         )
     console.print(table)
-    if len(snapshot.platforms) > 1:
-        console.print(Text("Cross-platform hostname overlap", style="bold"))
-        if snapshot.overlapping_hostnames:
-            _safe_print(", ".join(snapshot.overlapping_hostnames[:20]))
+    console.print(Text("Intentionally omitted", style="bold"))
+    for platform, omissions in snapshot.omissions.items():
+        _safe_print(platform, style="bold")
+        if omissions:
+            for omission in omissions:
+                _safe_print(f"  • {omission}")
         else:
-            _safe_print("No overlap observed in supported categories.", style="dim")
+            _safe_print("  • None listed", style="dim")
+
+
+def _print_comparison(session: AnalysisSession) -> None:
+    snapshot = session.snapshot()
+    console.print()
+    console.print(Text("Cross-platform comparison", style="bold"))
+    comparisons = (
+        (
+            "Shared hostnames",
+            snapshot.overlapping_hostnames,
+            "No hostname overlap observed in supported categories.",
+        ),
+        ("Shared devices", snapshot.overlapping_devices, "No device overlap observed."),
+        ("Shared services", snapshot.overlapping_services, "No service overlap observed."),
+    )
+    for heading, values, empty_message in comparisons:
+        console.print(Text(heading, style="bold"))
+        if values:
+            _safe_print(", ".join(values[:20]))
+        else:
+            _safe_print(empty_message, style="dim")
 
 
 def _print_preview(adapter: ModelAdapter, session: AnalysisSession, question: str) -> None:
@@ -314,19 +353,23 @@ def run_wizard() -> None:
             while has_data:
                 choices: list[Choice] = [
                     Choice("View privacy snapshot", "snapshot"),
-                    Choice("Review coverage and omissions", "snapshot"),
+                    Choice("Review coverage and omissions", "coverage"),
                     Choice("Ask questions", "ask"),
                     Choice("Add another platform", "add"),
                     Choice("Export a report", "save"),
                     Choice("Exit and delete temporary analysis", "exit"),
                 ]
                 if len(session.snapshot().platforms) > 1:
-                    choices.insert(2, Choice("Compare platforms", "snapshot"))
+                    choices.insert(2, Choice("Compare platforms", "compare"))
                 next_action = questionary.select(
                     "What would you like to do?", choices=choices
                 ).ask()
                 if next_action == "snapshot":
                     _print_snapshot(session)
+                elif next_action == "coverage":
+                    _print_coverage_and_omissions(session)
+                elif next_action == "compare":
+                    _print_comparison(session)
                 elif next_action == "ask":
                     _wizard_ask(session)
                 elif next_action == "save":
