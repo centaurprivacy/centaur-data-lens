@@ -36,6 +36,20 @@ class FakeAdapter:
         return json.dumps(self.response)
 
 
+def assert_answer_schema(schema: object) -> None:
+    assert isinstance(schema, dict)
+    assert schema["type"] == "object"
+    assert schema["additionalProperties"] is False
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    claims = properties["claims"]
+    assert isinstance(claims, dict)
+    item = claims["items"]
+    assert isinstance(item, dict)
+    assert item["required"] == ["text", "kind", "record_ids"]
+    assert item["additionalProperties"] is False
+
+
 def test_cloud_requires_explicit_confirmation(google_export: Path) -> None:
     adapter = FakeAdapter({"answer": "No call", "claims": []})
     with AnalysisSession() as session:
@@ -260,6 +274,249 @@ def test_provider_response_parsers(monkeypatch: pytest.MonkeyPatch) -> None:
         },
     )
     assert '"answer"' in gemini.complete(system="s", user="u")
+
+
+def test_ollama_requests_structured_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+    ollama = OllamaAdapter()
+
+    def respond(*args, **kwargs):
+        captured["payload"] = kwargs["payload"]
+        return {
+            "done_reason": "stop",
+            "message": {"content": '{"claims":[]}'},
+        }
+
+    monkeypatch.setattr(ollama, "_post_json", respond)
+
+    assert ollama.complete(system="s", user="u") == '{"claims":[]}'
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert_answer_schema(payload["format"])
+
+
+def test_openai_requests_strict_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    openai = OpenAIAdapter("synthetic")
+
+    def respond(*args, **kwargs):
+        captured["payload"] = kwargs["payload"]
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": '{"claims":[]}'},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(openai, "_post_json", respond)
+
+    assert openai.complete(system="s", user="u") == '{"claims":[]}'
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    response_format = payload["response_format"]
+    assert isinstance(response_format, dict)
+    assert response_format["type"] == "json_schema"
+    json_schema = response_format["json_schema"]
+    assert isinstance(json_schema, dict)
+    assert json_schema["name"] == "privacy_answer"
+    assert json_schema["strict"] is True
+    assert_answer_schema(json_schema["schema"])
+
+
+def test_anthropic_requests_and_reads_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    anthropic = AnthropicAdapter("synthetic")
+
+    def respond(*args, **kwargs):
+        captured["payload"] = kwargs["payload"]
+        return {
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "thinking", "thinking": "synthetic"},
+                {"type": "text", "text": '{"claims":'},
+                {"type": "text", "text": "[]}"},
+            ],
+        }
+
+    monkeypatch.setattr(anthropic, "_post_json", respond)
+
+    assert anthropic.complete(system="s", user="u") == '{"claims":[]}'
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    output_config = payload["output_config"]
+    assert isinstance(output_config, dict)
+    output_format = output_config["format"]
+    assert isinstance(output_format, dict)
+    assert output_format["type"] == "json_schema"
+    assert_answer_schema(output_format["schema"])
+
+
+def test_gemini_requests_and_reads_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    gemini = GeminiAdapter("synthetic")
+
+    def respond(*args, **kwargs):
+        captured["payload"] = kwargs["payload"]
+        return {
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {
+                        "parts": [
+                            {"thought": True, "text": "synthetic reasoning"},
+                            {"text": '{"claims":'},
+                            {"text": "[]}"},
+                        ]
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(gemini, "_post_json", respond)
+
+    assert gemini.complete(system="s", user="u") == '{"claims":[]}'
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    generation_config = payload["generationConfig"]
+    assert isinstance(generation_config, dict)
+    assert generation_config["responseMimeType"] == "application/json"
+    assert_answer_schema(generation_config["responseJsonSchema"])
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "message"),
+    [
+        ("max_tokens", "output limit"),
+        ("refusal", "declined"),
+    ],
+)
+def test_anthropic_reports_incomplete_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+    stop_reason: str,
+    message: str,
+) -> None:
+    anthropic = AnthropicAdapter("synthetic")
+    monkeypatch.setattr(
+        anthropic,
+        "_post_json",
+        lambda *args, **kwargs: {
+            "stop_reason": stop_reason,
+            "content": [{"type": "text", "text": '{"claims":'}],
+        },
+    )
+
+    with pytest.raises(ModelAdapterError, match=message):
+        anthropic.complete(system="s", user="u")
+
+
+def test_ollama_reports_incomplete_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ollama = OllamaAdapter()
+    monkeypatch.setattr(
+        ollama,
+        "_post_json",
+        lambda *args, **kwargs: {
+            "done_reason": "length",
+            "message": {"content": '{"claims":'},
+        },
+    )
+
+    with pytest.raises(ModelAdapterError, match="output limit"):
+        ollama.complete(system="s", user="u")
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        (
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": '{"claims":'},
+                    }
+                ]
+            },
+            "output limit",
+        ),
+        (
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"refusal": "synthetic refusal"},
+                    }
+                ]
+            },
+            "declined",
+        ),
+    ],
+)
+def test_openai_reports_incomplete_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+    response: dict[str, object],
+    message: str,
+) -> None:
+    openai = OpenAIAdapter("synthetic")
+    monkeypatch.setattr(openai, "_post_json", lambda *args, **kwargs: response)
+
+    with pytest.raises(ModelAdapterError, match=message):
+        openai.complete(system="s", user="u")
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "message"),
+    [
+        ("MAX_TOKENS", "output limit"),
+        ("SAFETY", "declined"),
+    ],
+)
+def test_gemini_reports_incomplete_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+    finish_reason: str,
+    message: str,
+) -> None:
+    gemini = GeminiAdapter("synthetic")
+    monkeypatch.setattr(
+        gemini,
+        "_post_json",
+        lambda *args, **kwargs: {
+            "candidates": [
+                {
+                    "finishReason": finish_reason,
+                    "content": {"parts": [{"text": '{"claims":'}]},
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ModelAdapterError, match=message):
+        gemini.complete(system="s", user="u")
+
+
+def test_gemini_reports_prompt_level_safety_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gemini = GeminiAdapter("synthetic")
+    monkeypatch.setattr(
+        gemini,
+        "_post_json",
+        lambda *args, **kwargs: {
+            "promptFeedback": {"blockReason": "SAFETY"},
+        },
+    )
+
+    with pytest.raises(ModelAdapterError, match="declined"):
+        gemini.complete(system="s", user="u")
 
 
 def test_adapter_factory_uses_environment(

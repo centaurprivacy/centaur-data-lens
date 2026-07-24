@@ -29,6 +29,30 @@ provided records. Return JSON with this exact shape:
 Every claim must cite at least one provided record ID. Clearly label inferences.
 Do not claim the export is complete."""
 
+_AI_ANSWER_JSON_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "claims": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["observed", "inference"]},
+                    "record_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["text", "kind", "record_ids"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["claims"],
+    "additionalProperties": False,
+}
+
 
 @dataclass(frozen=True)
 class TransmissionPreview:
@@ -107,13 +131,15 @@ class OllamaAdapter(_HTTPAdapter):
             payload={
                 "model": self.model,
                 "stream": False,
-                "format": "json",
+                "format": _AI_ANSWER_JSON_SCHEMA,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
             },
         )
+        if data.get("done_reason") == "length":
+            raise ModelAdapterError("Ollama reached the output limit before completing its answer.")
         message = data.get("message")
         if not isinstance(message, dict) or not isinstance(message.get("content"), str):
             raise ModelAdapterError("Ollama returned an unsupported response.")
@@ -147,7 +173,14 @@ class OpenAIAdapter(_HTTPAdapter):
             },
             payload={
                 "model": self.model,
-                "response_format": {"type": "json_object"},
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "privacy_answer",
+                        "strict": True,
+                        "schema": _AI_ANSWER_JSON_SCHEMA,
+                    },
+                },
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -160,8 +193,16 @@ class OpenAIAdapter(_HTTPAdapter):
         first = choices[0]
         if not isinstance(first, dict):
             raise ModelAdapterError("The model provider returned an unsupported response.")
+        if first.get("finish_reason") == "length":
+            raise ModelAdapterError("OpenAI reached the output limit before completing its answer.")
+        if first.get("finish_reason") == "content_filter":
+            raise ModelAdapterError("OpenAI declined to answer this question.")
         message = first.get("message")
-        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+        if not isinstance(message, dict):
+            raise ModelAdapterError("The model provider returned an unsupported response.")
+        if isinstance(message.get("refusal"), str):
+            raise ModelAdapterError("OpenAI declined to answer this question.")
+        if not isinstance(message.get("content"), str):
             raise ModelAdapterError("The model provider returned an unsupported response.")
         return cast(str, message["content"])
 
@@ -188,15 +229,32 @@ class AnthropicAdapter(_HTTPAdapter):
                 "max_tokens": 1_500,
                 "system": system,
                 "messages": [{"role": "user", "content": user}],
+                "output_config": {
+                    "format": {
+                        "type": "json_schema",
+                        "schema": _AI_ANSWER_JSON_SCHEMA,
+                    }
+                },
             },
         )
+        stop_reason = data.get("stop_reason")
+        if stop_reason == "max_tokens":
+            raise ModelAdapterError(
+                "Anthropic reached the output limit before completing its answer."
+            )
+        if stop_reason == "refusal":
+            raise ModelAdapterError("Anthropic declined to answer this question.")
         content = data.get("content")
-        if not isinstance(content, list) or not content or not isinstance(content[0], dict):
+        if not isinstance(content, list) or not content:
             raise ModelAdapterError("Anthropic returned an unsupported response.")
-        text = content[0].get("text")
-        if not isinstance(text, str):
+        text_blocks = [
+            block["text"]
+            for block in content
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        ]
+        if not text_blocks:
             raise ModelAdapterError("Anthropic returned an unsupported response.")
-        return text
+        return "".join(text_blocks)
 
 
 class GeminiAdapter(_HTTPAdapter):
@@ -216,9 +274,21 @@ class GeminiAdapter(_HTTPAdapter):
             payload={
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": user}]}],
-                "generationConfig": {"responseMimeType": "application/json"},
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "responseJsonSchema": _AI_ANSWER_JSON_SCHEMA,
+                },
             },
         )
+        prompt_feedback = data.get("promptFeedback")
+        if isinstance(prompt_feedback, dict):
+            block_reason = prompt_feedback.get("blockReason")
+            if (
+                isinstance(block_reason, str)
+                and block_reason
+                and block_reason != "BLOCK_REASON_UNSPECIFIED"
+            ):
+                raise ModelAdapterError("Gemini declined to answer this question.")
         candidates = data.get("candidates")
         if (
             not isinstance(candidates, list)
@@ -226,16 +296,36 @@ class GeminiAdapter(_HTTPAdapter):
             or not isinstance(candidates[0], dict)
         ):
             raise ModelAdapterError("Gemini returned an unsupported response.")
-        content = candidates[0].get("content")
+        first = candidates[0]
+        finish_reason = first.get("finishReason")
+        if finish_reason == "MAX_TOKENS":
+            raise ModelAdapterError("Gemini reached the output limit before completing its answer.")
+        if finish_reason in {
+            "SAFETY",
+            "RECITATION",
+            "BLOCKLIST",
+            "PROHIBITED_CONTENT",
+            "SPII",
+        }:
+            raise ModelAdapterError("Gemini declined to answer this question.")
+        content = first.get("content")
         if not isinstance(content, dict):
             raise ModelAdapterError("Gemini returned an unsupported response.")
         parts = content.get("parts")
-        if not isinstance(parts, list) or not parts or not isinstance(parts[0], dict):
+        if not isinstance(parts, list) or not parts:
             raise ModelAdapterError("Gemini returned an unsupported response.")
-        text = parts[0].get("text")
-        if not isinstance(text, str):
+        text_parts = [
+            part["text"]
+            for part in parts
+            if (
+                isinstance(part, dict)
+                and part.get("thought") is not True
+                and isinstance(part.get("text"), str)
+            )
+        ]
+        if not text_parts:
             raise ModelAdapterError("Gemini returned an unsupported response.")
-        return text
+        return "".join(text_parts)
 
 
 def _validate_model(model: str) -> str:
