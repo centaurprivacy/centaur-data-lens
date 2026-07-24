@@ -1,0 +1,36 @@
+# Threat model
+
+## Protected assets
+
+- Platform export contents and derived records
+- API keys
+- Saved reports and diagnostics
+- The integrity of the user's filesystem and terminal
+
+## Threats in scope
+
+- Malicious or malformed ZIP/JSON input
+- Path traversal, symlinks, nested archives, and resource-exhaustion archives
+- Terminal escape and hyperlink injection
+- HTML/script injection in offline reports
+- Accidental cloud transmission or credential disclosure
+- Redirect, proxy, and custom-endpoint surprises
+- Prompt injection contained in an export
+- Sensitive data in logs, exceptions, diagnostics, and temporary files
+- Dependency and release-pipeline compromise
+
+## Security boundaries
+
+Archive records are untrusted data. They are never executed, rendered as HTML,
+passed to a shell, or granted tools. Local deterministic workflows must not open
+sockets. Cloud model adapters require a deliberate provider choice, payload
+preview, and confirmation.
+
+## Known limitations
+
+- Python cannot guarantee secret zeroization from process memory.
+- Best-effort deletion cannot guarantee physical erasure.
+- Provider export schemas are undocumented and change over time.
+- v0.1 is an alpha release and is not externally audited.
+
+An independent security review is required before a stable v1.0 release.
