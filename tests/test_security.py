@@ -44,10 +44,12 @@ def test_stale_cleanup_only_removes_marked_directories(
 ) -> None:
     stale = tmp_path / "centaur-data-lens-stale"
     stale.mkdir()
-    (stale / ".centaur-data-lens-session").write_text("ephemeral-v1\n", encoding="utf-8")
+    marker = stale / ".centaur-data-lens-session"
+    marker.write_text("ephemeral-v1\n", encoding="utf-8")
     unrelated = tmp_path / "centaur-data-lens-unrelated"
     unrelated.mkdir()
     monkeypatch.setattr("centaur_data_lens.security.tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr("centaur_data_lens.security.time.time", lambda: marker.stat().st_mtime + 1)
     assert cleanup_stale_sessions(older_than_seconds=0) == 1
     assert not stale.exists()
     assert unrelated.exists()
