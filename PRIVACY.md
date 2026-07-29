@@ -21,10 +21,35 @@ schema version and per-platform category counts—not record values or paths.
 
 ## Optional AI
 
-Ollama is restricted to the local loopback interface by default. Bring-your-own
-key adapters communicate directly with the selected provider after showing a
-transmission preview and receiving confirmation. Centaur does not receive the
-key, prompt, response, or export.
+Q&A first calculates archive-wide and question-matching facts in the local
+ephemeral index. It then selects no more than 100 diversified evidence records
+within a 256 KiB total request cap. Counts and other derived facts describe one
+person's export and must themselves be treated as personal data.
+
+Ollama is restricted to the local loopback interface and is the recommended
+provider. A validated OpenAI-compatible loopback endpoint is also local. Local
+models may receive calculated facts and selected normalized record values
+without cloud authorization.
+
+Bring-your-own-key cloud adapters are an advanced escape hatch. Before each
+cloud question, the CLI shows the provider, model, destination, exact payload
+size, archive and matching counts, fact and evidence counts, categories,
+transmitted field names, and detected sensitivity classes. It warns that the
+question, calculated facts, and records may be personal data. Interactive use
+requires typing `SEND PERSONAL DATA` for that question; non-interactive use
+requires explicit provider selection and `--allow-cloud`.
+
+No model, embedding, classification, or planning request occurs before that
+authorization. Authorization is never reused for another question. The exact
+previewed payload is the payload transmitted. Model payloads exclude source
+paths, archive identifiers, internal filenames, complete archives, media, API
+keys, and unsupported categories.
+
+Cloud providers may retain or use requests under their own terms. The privacy
+promise is therefore **local by default with explicit per-question cloud
+disclosure**, not anonymity and not a claim that cloud models never receive
+personal information. Centaur communicates directly with the selected provider
+and does not receive the key, prompt, response, or export.
 
 Centaur Data Lens has no analytics, crash reporter, automatic updater, or
 background service.

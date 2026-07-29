@@ -27,12 +27,17 @@ class FakeAdapter:
 
     def __init__(self, response: dict[str, object]) -> None:
         self.response = response
+        self.calls = 0
 
     def complete(self, *, system: str, user: str) -> str:
+        self.calls += 1
         assert "untrusted data" in system
         assert "record_ids" in system
+        assert "fact_ids" in system
         assert "source_ids" not in system
-        assert "records" in json.loads(user)
+        decoded = json.loads(user)
+        assert "calculated_facts" in decoded
+        assert "evidence_records" in decoded
         return json.dumps(self.response)
 
 
@@ -54,13 +59,14 @@ def test_cloud_requires_explicit_confirmation(google_export: Path) -> None:
     adapter = FakeAdapter({"answer": "No call", "claims": []})
     with AnalysisSession() as session:
         analyze_sources(session, [SourceSpec("google", google_export)])
+        prepared = prepare_question(session, "What was searched?", adapter)
         with pytest.raises(ModelAdapterError, match="not confirmed"):
             answer_question(
-                session,
-                question="What was searched?",
+                prepared,
                 adapter=adapter,
                 allow_cloud=False,
             )
+    assert adapter.calls == 0
 
 
 def test_validates_model_citations(google_export: Path) -> None:
@@ -77,10 +83,10 @@ def test_validates_model_citations(google_export: Path) -> None:
     )
     with AnalysisSession() as session:
         analyze_sources(session, [SourceSpec("google", google_export)])
+        prepared = prepare_question(session, "privacy", adapter)
         with pytest.raises(ModelAdapterError, match="fabricated"):
             answer_question(
-                session,
-                question="What was searched?",
+                prepared,
                 adapter=adapter,
                 allow_cloud=True,
             )
@@ -90,14 +96,28 @@ def test_context_is_bounded_and_preview_is_explicit(google_export: Path) -> None
     adapter = FakeAdapter({"answer": "ok", "claims": []})
     with AnalysisSession() as session:
         analyze_sources(session, [SourceSpec("google", google_export)])
-        preview, payload, _ = prepare_question(session, "privacy", adapter)
+        prepared = prepare_question(session, "privacy", adapter)
+    preview = prepared.preview
+    payload = prepared.payload
     assert isinstance(preview, TransmissionPreview)
     assert preview.payload_bytes <= 256 * 1024
+    assert preview.payload_bytes == len(payload.encode())
     assert preview.destination == "https://provider.invalid"
+    assert preview.total_records == 5
+    assert preview.matching_records == 1
+    assert preview.fact_count >= 2
+    assert preview.data_mode == "cloud_raw_personal_data"
     assert "privacy tools" in payload
     decoded = json.loads(payload)
-    assert "source_references" in decoded["records"][0]
-    assert "source_ids" not in decoded["records"][0]
+    assert decoded["scope"]["total_records"] == 5
+    assert decoded["scope"]["matching_records"] == 1
+    assert decoded["calculated_facts"]
+    assert decoded["evidence_records"]
+    assert "source_references" not in payload
+    assert "source_ids" not in payload
+    assert "archive_id" not in payload
+    assert "internal_path" not in payload
+    assert "Takeout/" not in payload
 
 
 def test_complete_payload_rejects_oversized_question(google_export: Path) -> None:
@@ -134,9 +154,9 @@ def test_successful_answer_uses_available_record_id(google_export: Path) -> None
                 ],
             }
         )
-        _, answer = answer_question(
-            session,
-            question="What privacy searches appear?",
+        prepared = prepare_question(session, "What privacy searches appear?", adapter)
+        answer = answer_question(
+            prepared,
             adapter=adapter,
             allow_cloud=True,
         )
@@ -147,16 +167,16 @@ def test_rejects_answer_without_validated_claims(google_export: Path) -> None:
     adapter = FakeAdapter({"claims": []})
     with AnalysisSession() as session:
         analyze_sources(session, [SourceSpec("google", google_export)])
+        prepared = prepare_question(session, "What happened?", adapter)
         with pytest.raises(ModelAdapterError, match="at least one cited claim"):
             answer_question(
-                session,
-                question="What happened?",
+                prepared,
                 adapter=adapter,
                 allow_cloud=True,
             )
 
 
-def test_rejects_calculated_ai_claim_kind(google_export: Path) -> None:
+def test_calculated_claim_requires_fact_evidence(google_export: Path) -> None:
     with AnalysisSession() as session:
         analyze_sources(session, [SourceSpec("google", google_export)])
         record_id = session.search("privacy")[0].record_id
@@ -171,13 +191,66 @@ def test_rejects_calculated_ai_claim_kind(google_export: Path) -> None:
                 ],
             }
         )
-        with pytest.raises(ModelAdapterError, match="invalid structured answer"):
+        prepared = prepare_question(session, "privacy", adapter)
+        with pytest.raises(ModelAdapterError, match="requires calculated-fact"):
             answer_question(
-                session,
-                question="What happened?",
+                prepared,
                 adapter=adapter,
                 allow_cloud=True,
             )
+
+
+def test_calculated_claim_accepts_valid_fact_evidence(google_export: Path) -> None:
+    adapter = FakeAdapter({"claims": []})
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        prepared = prepare_question(session, "privacy", adapter)
+        fact_id = next(iter(prepared.valid_fact_ids))
+        adapter.response = {
+            "claims": [
+                {
+                    "text": "A local calculation was provided.",
+                    "kind": "calculated",
+                    "fact_ids": [fact_id],
+                }
+            ]
+        }
+        answer = answer_question(prepared, adapter=adapter, allow_cloud=True)
+    assert answer.claims[0].fact_ids == [fact_id]
+
+
+def test_rejects_fabricated_fact_citation(google_export: Path) -> None:
+    adapter = FakeAdapter(
+        {
+            "claims": [
+                {
+                    "text": "A fabricated calculation.",
+                    "kind": "calculated",
+                    "fact_ids": ["fact-fabricated"],
+                }
+            ]
+        }
+    )
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        prepared = prepare_question(session, "privacy", adapter)
+        with pytest.raises(ModelAdapterError, match="fabricated or unavailable fact"):
+            answer_question(prepared, adapter=adapter, allow_cloud=True)
+
+
+def test_no_match_question_still_has_archive_facts(google_export: Path) -> None:
+    adapter = FakeAdapter({"claims": []})
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        prepared = prepare_question(session, "quantum zebras", adapter)
+    decoded = json.loads(prepared.payload)
+    assert prepared.preview.matching_records == 0
+    assert prepared.preview.record_count == 0
+    assert decoded["evidence_records"] == []
+    assert any(
+        fact["scope"] == "matching" and fact["metric"] == "record_count" and fact["value"] == 0
+        for fact in decoded["calculated_facts"]
+    )
 
 
 def test_observed_claim_requires_evidence(google_export: Path) -> None:
@@ -188,10 +261,10 @@ def test_observed_claim_requires_evidence(google_export: Path) -> None:
     )
     with AnalysisSession() as session:
         analyze_sources(session, [SourceSpec("google", google_export)])
-        with pytest.raises(ModelAdapterError, match="without evidence"):
+        prepared = prepare_question(session, "What happened?", adapter)
+        with pytest.raises(ModelAdapterError, match="requires record evidence"):
             answer_question(
-                session,
-                question="What happened?",
+                prepared,
                 adapter=adapter,
                 allow_cloud=True,
             )
@@ -205,10 +278,10 @@ def test_inference_claim_requires_supporting_evidence(google_export: Path) -> No
     )
     with AnalysisSession() as session:
         analyze_sources(session, [SourceSpec("google", google_export)])
-        with pytest.raises(ModelAdapterError, match="without evidence"):
+        prepared = prepare_question(session, "What might this mean?", adapter)
+        with pytest.raises(ModelAdapterError, match="requires supporting evidence"):
             answer_question(
-                session,
-                question="What might this mean?",
+                prepared,
                 adapter=adapter,
                 allow_cloud=True,
             )
@@ -229,10 +302,10 @@ def test_rejects_ambiguous_legacy_source_ids(google_export: Path) -> None:
                 ],
             }
         )
+        prepared = prepare_question(session, "privacy", adapter)
         with pytest.raises(ModelAdapterError, match="invalid structured answer"):
             answer_question(
-                session,
-                question="What happened?",
+                prepared,
                 adapter=adapter,
                 allow_cloud=True,
             )

@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import sqlite3
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
+from typing import Literal
 
 from centaur_data_lens.archive import ArchiveReader
 from centaur_data_lens.errors import DataLensError
 from centaur_data_lens.models import (
+    CalculatedFact,
     CoverageItem,
     EvidenceItem,
     NormalizedRecord,
@@ -24,12 +28,187 @@ from centaur_data_lens.security import cleanup_stale_sessions, secure_temp_direc
 
 ProgressCallback = Callable[[str], None]
 _FTS_TOKEN_RE = re.compile(r"[\w.-]+", re.UNICODE)
+_QUESTION_STOP_WORDS = frozenset(
+    {
+        "a",
+        "about",
+        "all",
+        "an",
+        "and",
+        "are",
+        "can",
+        "data",
+        "do",
+        "does",
+        "export",
+        "from",
+        "give",
+        "have",
+        "i",
+        "in",
+        "is",
+        "me",
+        "my",
+        "of",
+        "on",
+        "overview",
+        "please",
+        "show",
+        "tell",
+        "the",
+        "there",
+        "this",
+        "to",
+        "was",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+        "with",
+    }
+)
+_TOP_VALUE_QUERIES = {
+    "service": (
+        """
+        SELECT service, COUNT(*)
+        FROM records
+        WHERE service IS NOT NULL
+        GROUP BY service
+        ORDER BY COUNT(*) DESC, service
+        LIMIT 10
+        """,
+        """
+        SELECT records.service, COUNT(*)
+        FROM records_fts
+        JOIN records ON records.record_id = records_fts.record_id
+        WHERE records_fts MATCH ? AND records.service IS NOT NULL
+        GROUP BY records.service
+        ORDER BY COUNT(*) DESC, records.service
+        LIMIT 10
+        """,
+    ),
+    "hostname": (
+        """
+        SELECT hostname, COUNT(*)
+        FROM records
+        WHERE hostname IS NOT NULL
+        GROUP BY hostname
+        ORDER BY COUNT(*) DESC, hostname
+        LIMIT 10
+        """,
+        """
+        SELECT records.hostname, COUNT(*)
+        FROM records_fts
+        JOIN records ON records.record_id = records_fts.record_id
+        WHERE records_fts MATCH ? AND records.hostname IS NOT NULL
+        GROUP BY records.hostname
+        ORDER BY COUNT(*) DESC, records.hostname
+        LIMIT 10
+        """,
+    ),
+    "device": (
+        """
+        SELECT device, COUNT(*)
+        FROM records
+        WHERE device IS NOT NULL
+        GROUP BY device
+        ORDER BY COUNT(*) DESC, device
+        LIMIT 10
+        """,
+        """
+        SELECT records.device, COUNT(*)
+        FROM records_fts
+        JOIN records ON records.record_id = records_fts.record_id
+        WHERE records_fts MATCH ? AND records.device IS NOT NULL
+        GROUP BY records.device
+        ORDER BY COUNT(*) DESC, records.device
+        LIMIT 10
+        """,
+    ),
+    "activity_type": (
+        """
+        SELECT activity_type, COUNT(*)
+        FROM records
+        GROUP BY activity_type
+        ORDER BY COUNT(*) DESC, activity_type
+        LIMIT 10
+        """,
+        """
+        SELECT records.activity_type, COUNT(*)
+        FROM records_fts
+        JOIN records ON records.record_id = records_fts.record_id
+        WHERE records_fts MATCH ?
+        GROUP BY records.activity_type
+        ORDER BY COUNT(*) DESC, records.activity_type
+        LIMIT 10
+        """,
+    ),
+}
 
 
 @dataclass(frozen=True)
 class SourceSpec:
     platform: str
     path: Path
+
+
+@dataclass(frozen=True)
+class QuestionContext:
+    total_records: int
+    matching_records: int
+    selection_mode: str
+    facts: tuple[CalculatedFact, ...]
+    records: tuple[NormalizedRecord, ...]
+
+
+def _fts_query(question: str) -> str | None:
+    tokens = [
+        token
+        for token in _FTS_TOKEN_RE.findall(question.lower())[:20]
+        if token not in _QUESTION_STOP_WORDS
+    ]
+    if not tokens:
+        return None
+    return " OR ".join(f'"{token.replace(chr(34), "")}"' for token in tokens)
+
+
+def _fact(
+    *,
+    scope: Literal["archive", "matching"],
+    scope_definition: str,
+    metric: str,
+    value: str | int | float,
+    dimensions: dict[str, str] | None = None,
+) -> CalculatedFact:
+    actual_dimensions = dimensions or {}
+    identity = json.dumps(
+        {
+            "scope": scope,
+            "scope_definition": scope_definition,
+            "metric": metric,
+            "dimensions": actual_dimensions,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    digest = sha256(identity.encode("utf-8")).hexdigest()[:24]
+    provenance = (
+        "Local SQLite aggregate over every supported normalized record."
+        if scope_definition == "all_supported_records"
+        else "Local SQLite aggregate over every full-text record match."
+    )
+    return CalculatedFact(
+        fact_id=f"fact-{digest}",
+        scope=scope,
+        scope_definition=scope_definition,
+        metric=metric,
+        value=value,
+        dimensions=actual_dimensions,
+        provenance=provenance,
+    )
 
 
 class AnalysisSession:
@@ -51,8 +230,11 @@ class AnalysisSession:
                 record_id TEXT PRIMARY KEY,
                 platform TEXT NOT NULL,
                 category TEXT NOT NULL,
+                activity_type TEXT NOT NULL,
+                service TEXT,
                 timestamp TEXT,
                 hostname TEXT,
+                device TEXT,
                 title TEXT,
                 payload TEXT NOT NULL
             );
@@ -89,15 +271,21 @@ class AnalysisSession:
         attributes = " ".join(str(value) for value in record.attributes.values())
         self._connection.execute(
             """
-            INSERT INTO records(record_id, platform, category, timestamp, hostname, title, payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO records(
+                record_id, platform, category, activity_type, service, timestamp,
+                hostname, device, title, payload
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.record_id,
                 record.platform,
                 record.category,
+                record.activity_type,
+                record.service,
                 record.timestamp.isoformat() if record.timestamp else None,
                 record.hostname,
+                record.device,
                 record.title,
                 record.model_dump_json(),
             ),
@@ -127,10 +315,9 @@ class AnalysisSession:
             yield NormalizedRecord.model_validate_json(payload)
 
     def search(self, question: str, *, limit: int = 100) -> list[NormalizedRecord]:
-        tokens = _FTS_TOKEN_RE.findall(question)[:20]
-        if not tokens:
+        query = _fts_query(question)
+        if query is None:
             return list(self.records())[:limit]
-        query = " OR ".join(f'"{token.replace(chr(34), "")}"' for token in tokens)
         rows = self._connection.execute(
             """
             SELECT records.payload
@@ -147,6 +334,336 @@ class AnalysisSession:
                 "SELECT payload FROM records ORDER BY timestamp DESC LIMIT ?", (limit,)
             ).fetchall()
         return [NormalizedRecord.model_validate_json(row[0]) for row in rows]
+
+    def _matching_count(self, query: str | None) -> int:
+        if query is None:
+            return int(self._connection.execute("SELECT COUNT(*) FROM records").fetchone()[0])
+        return int(
+            self._connection.execute(
+                "SELECT COUNT(*) FROM records_fts WHERE records_fts MATCH ?",
+                (query,),
+            ).fetchone()[0]
+        )
+
+    def _coverage_rows(self, query: str | None) -> list[tuple[object, ...]]:
+        if query is None:
+            return self._connection.execute(
+                """
+                SELECT platform, category, COUNT(*), MIN(timestamp), MAX(timestamp)
+                FROM records
+                GROUP BY platform, category
+                ORDER BY platform, category
+                """
+            ).fetchall()
+        return self._connection.execute(
+            """
+            SELECT records.platform, records.category, COUNT(*),
+                   MIN(records.timestamp), MAX(records.timestamp)
+            FROM records_fts
+            JOIN records ON records.record_id = records_fts.record_id
+            WHERE records_fts MATCH ?
+            GROUP BY records.platform, records.category
+            ORDER BY records.platform, records.category
+            """,
+            (query,),
+        ).fetchall()
+
+    def _date_row(self, query: str | None) -> tuple[str | None, str | None]:
+        if query is None:
+            row = self._connection.execute(
+                "SELECT MIN(timestamp), MAX(timestamp) FROM records"
+            ).fetchone()
+        else:
+            row = self._connection.execute(
+                """
+                SELECT MIN(records.timestamp), MAX(records.timestamp)
+                FROM records_fts
+                JOIN records ON records.record_id = records_fts.record_id
+                WHERE records_fts MATCH ?
+                """,
+                (query,),
+            ).fetchone()
+        return row[0], row[1]
+
+    def _time_rows(self, query: str | None) -> list[tuple[str, int]]:
+        if query is None:
+            return self._connection.execute(
+                """
+                SELECT substr(timestamp, 1, 4), COUNT(*)
+                FROM records
+                WHERE timestamp IS NOT NULL
+                GROUP BY substr(timestamp, 1, 4)
+                ORDER BY substr(timestamp, 1, 4)
+                LIMIT 25
+                """
+            ).fetchall()
+        return self._connection.execute(
+            """
+            SELECT substr(records.timestamp, 1, 4), COUNT(*)
+            FROM records_fts
+            JOIN records ON records.record_id = records_fts.record_id
+            WHERE records_fts MATCH ? AND records.timestamp IS NOT NULL
+            GROUP BY substr(records.timestamp, 1, 4)
+            ORDER BY substr(records.timestamp, 1, 4)
+            LIMIT 25
+            """,
+            (query,),
+        ).fetchall()
+
+    def _top_value_rows(self, field: str, query: str | None) -> list[tuple[str, int]]:
+        archive_sql, matching_sql = _TOP_VALUE_QUERIES[field]
+        if query is None:
+            return self._connection.execute(archive_sql).fetchall()
+        return self._connection.execute(matching_sql, (query,)).fetchall()
+
+    def _scope_facts(
+        self,
+        *,
+        scope: Literal["archive", "matching"],
+        query: str | None,
+        record_count: int,
+    ) -> list[CalculatedFact]:
+        scope_definition = (
+            "all_supported_records"
+            if query is None
+            else f"full_text_query_sha256:{sha256(query.encode('utf-8')).hexdigest()}"
+        )
+        facts = [
+            _fact(
+                scope=scope,
+                scope_definition=scope_definition,
+                metric="record_count",
+                value=record_count,
+            )
+        ]
+        earliest, latest = self._date_row(query)
+        if earliest:
+            facts.append(
+                _fact(
+                    scope=scope,
+                    scope_definition=scope_definition,
+                    metric="earliest_timestamp",
+                    value=earliest,
+                )
+            )
+        if latest:
+            facts.append(
+                _fact(
+                    scope=scope,
+                    scope_definition=scope_definition,
+                    metric="latest_timestamp",
+                    value=latest,
+                )
+            )
+
+        for platform, category, count, category_earliest, category_latest in self._coverage_rows(
+            query
+        ):
+            dimensions = {"platform": str(platform), "category": str(category)}
+            facts.append(
+                _fact(
+                    scope=scope,
+                    scope_definition=scope_definition,
+                    metric="record_count",
+                    value=int(str(count)),
+                    dimensions=dimensions,
+                )
+            )
+            if category_earliest:
+                facts.append(
+                    _fact(
+                        scope=scope,
+                        scope_definition=scope_definition,
+                        metric="earliest_timestamp",
+                        value=str(category_earliest),
+                        dimensions=dimensions,
+                    )
+                )
+            if category_latest:
+                facts.append(
+                    _fact(
+                        scope=scope,
+                        scope_definition=scope_definition,
+                        metric="latest_timestamp",
+                        value=str(category_latest),
+                        dimensions=dimensions,
+                    )
+                )
+
+        for year, count in self._time_rows(query):
+            facts.append(
+                _fact(
+                    scope=scope,
+                    scope_definition=scope_definition,
+                    metric="record_count",
+                    value=count,
+                    dimensions={"year": year},
+                )
+            )
+        for field in ("service", "hostname", "device", "activity_type"):
+            for raw_value, count in self._top_value_rows(field, query):
+                facts.append(
+                    _fact(
+                        scope=scope,
+                        scope_definition=scope_definition,
+                        metric="record_count",
+                        value=count,
+                        dimensions={field: str(raw_value)},
+                    )
+                )
+        return facts
+
+    def _candidate_records(
+        self,
+        query: str | None,
+        *,
+        limit: int,
+    ) -> list[NormalizedRecord]:
+        if query is None:
+            rows = self._connection.execute(
+                """
+                WITH ranked AS (
+                    SELECT payload, platform, category, timestamp, record_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY platform, category,
+                                            COALESCE(substr(timestamp, 1, 4), 'unknown')
+                               ORDER BY timestamp DESC, record_id
+                           ) AS stratum_rank
+                    FROM records
+                )
+                SELECT payload
+                FROM ranked
+                ORDER BY stratum_rank, platform, category, timestamp DESC, record_id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                """
+                WITH matches AS (
+                    SELECT records.payload, records.platform, records.category,
+                           records.timestamp, records.record_id,
+                           bm25(records_fts) AS relevance
+                    FROM records_fts
+                    JOIN records ON records.record_id = records_fts.record_id
+                    WHERE records_fts MATCH ?
+                ),
+                ranked AS (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY platform, category,
+                                            COALESCE(substr(timestamp, 1, 4), 'unknown')
+                               ORDER BY relevance, record_id
+                           ) AS stratum_rank
+                    FROM matches
+                )
+                SELECT payload
+                FROM ranked
+                ORDER BY stratum_rank, relevance, record_id
+                LIMIT ?
+                """,
+                (query, limit),
+            ).fetchall()
+        return [NormalizedRecord.model_validate_json(row[0]) for row in rows]
+
+    @staticmethod
+    def _diversify(
+        candidates: Sequence[NormalizedRecord],
+        *,
+        limit: int,
+    ) -> tuple[NormalizedRecord, ...]:
+        if len(candidates) <= limit:
+            return tuple(candidates)
+
+        group_counts: Counter[tuple[str, str]] = Counter()
+        for record in candidates:
+            for field, value in (
+                ("service", record.service),
+                ("hostname", record.hostname),
+                ("device", record.device),
+                ("activity_type", record.activity_type),
+            ):
+                if value:
+                    group_counts[(field, value)] += 1
+
+        selected: list[NormalizedRecord] = []
+        selected_ids: set[str] = set()
+        seen_groups: set[tuple[object, ...]] = set()
+        indexed = list(enumerate(candidates))
+        while len(selected) < limit:
+            best: tuple[int, int, NormalizedRecord, tuple[tuple[object, ...], ...]] | None = None
+            for index, record in indexed:
+                if record.record_id in selected_ids:
+                    continue
+                year = str(record.timestamp.year) if record.timestamp else "unknown"
+                groups: list[tuple[object, ...]] = [
+                    ("stratum", record.platform, record.category, year),
+                    ("category", record.platform, record.category),
+                ]
+                for field, value in (
+                    ("service", record.service),
+                    ("hostname", record.hostname),
+                    ("device", record.device),
+                    ("activity_type", record.activity_type),
+                ):
+                    if value and group_counts[(field, value)] > 1:
+                        groups.append((field, value))
+                novelty = sum(group not in seen_groups for group in groups)
+                candidate = (novelty, -index, record, tuple(groups))
+                if best is None or candidate[:2] > best[:2]:
+                    best = candidate
+            if best is None:
+                break
+            _, _, record, selected_groups = best
+            selected.append(record)
+            selected_ids.add(record.record_id)
+            seen_groups.update(selected_groups)
+        return tuple(selected)
+
+    def question_context(
+        self,
+        question: str,
+        *,
+        candidate_limit: int = 1_000,
+        evidence_limit: int = 100,
+    ) -> QuestionContext:
+        total_records = self._matching_count(None)
+        query = _fts_query(question)
+        matching_records = self._matching_count(query)
+        archive_facts = self._scope_facts(
+            scope="archive",
+            query=None,
+            record_count=total_records,
+        )
+        if query is None:
+            facts = [
+                archive_facts[0],
+                _fact(
+                    scope="matching",
+                    scope_definition="all_supported_records",
+                    metric="record_count",
+                    value=matching_records,
+                ),
+            ]
+            facts.extend(archive_facts[1:])
+        else:
+            matching_facts = self._scope_facts(
+                scope="matching",
+                query=query,
+                record_count=matching_records,
+            )
+            facts = [archive_facts[0], matching_facts[0]]
+            facts.extend(matching_facts[1:])
+            facts.extend(archive_facts[1:])
+        candidates = self._candidate_records(query, limit=candidate_limit)
+        return QuestionContext(
+            total_records=total_records,
+            matching_records=matching_records,
+            selection_mode="archive" if query is None else "full_text",
+            facts=tuple(facts),
+            records=self._diversify(candidates, limit=evidence_limit),
+        )
 
     def snapshot(self) -> PrivacySnapshot:
         coverage_rows = self._connection.execute(

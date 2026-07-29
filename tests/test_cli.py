@@ -6,7 +6,6 @@ import pytest
 from typer.testing import CliRunner
 
 import centaur_data_lens.cli as cli
-from centaur_data_lens.ai import TransmissionPreview
 from centaur_data_lens.analysis import AnalysisSession, SourceSpec, analyze_sources
 from centaur_data_lens.cli import app
 from centaur_data_lens.models import AIAnswer, AIClaim, AIClaimKind
@@ -189,6 +188,115 @@ def test_coverage_view_includes_excluded_categories(
     assert "Gmail" in output
 
 
+def test_wizard_places_cloud_providers_behind_advanced_choice(
+    monkeypatch: pytest.MonkeyPatch,
+    google_export: Path,
+) -> None:
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        selections = iter(["advanced-cloud", "openai"])
+        monkeypatch.setattr(
+            cli.questionary,
+            "select",
+            lambda *args, **kwargs: _Prompt(next(selections)),
+        )
+        monkeypatch.setattr(
+            cli.questionary,
+            "text",
+            lambda *args, **kwargs: _Prompt("What was searched?"),
+        )
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(cli, "_ask_once", lambda *args, **kwargs: calls.append(kwargs))
+        cli._wizard_ask(session)
+    assert calls[0]["provider"] == "openai"
+    assert calls[0]["allow_cloud"] is False
+
+
+def test_cloud_question_requires_exact_typed_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    google_export: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class CloudAdapter:
+        name = "cloud-test"
+        model = "test"
+        destination = "https://provider.invalid"
+        is_local = False
+
+        def complete(self, *, system: str, user: str) -> str:
+            raise AssertionError("mock answer_question should be used")
+
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        monkeypatch.setattr(cli, "create_adapter", lambda *args, **kwargs: CloudAdapter())
+        monkeypatch.setattr(
+            cli.questionary,
+            "text",
+            lambda *args, **kwargs: _Prompt("send personal data"),
+        )
+        calls: list[object] = []
+        monkeypatch.setattr(
+            cli,
+            "answer_question",
+            lambda *args, **kwargs: calls.append(args[0]) or AIAnswer(claims=[]),
+        )
+        cli._ask_once(
+            session,
+            question="privacy",
+            provider="openai",
+            model=None,
+            endpoint=None,
+            allow_cloud=False,
+        )
+    assert calls == []
+    output = capsys.readouterr().out
+    assert "may contain" in output
+    assert "personal data" in output
+    assert "Cloud request cancelled" in output
+
+
+def test_cloud_confirmation_is_per_question(
+    monkeypatch: pytest.MonkeyPatch,
+    google_export: Path,
+) -> None:
+    class CloudAdapter:
+        name = "cloud-test"
+        model = "test"
+        destination = "https://provider.invalid"
+        is_local = False
+
+        def complete(self, *, system: str, user: str) -> str:
+            raise AssertionError("mock answer_question should be used")
+
+    prompts: list[str] = []
+
+    def authorize(message: str) -> _Prompt:
+        prompts.append(message)
+        return _Prompt("SEND PERSONAL DATA")
+
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        monkeypatch.setattr(cli, "create_adapter", lambda *args, **kwargs: CloudAdapter())
+        monkeypatch.setattr(cli.questionary, "text", authorize)
+        calls: list[object] = []
+        monkeypatch.setattr(
+            cli,
+            "answer_question",
+            lambda *args, **kwargs: calls.append(args[0]) or AIAnswer(claims=[]),
+        )
+        for question in ("privacy", "video"):
+            cli._ask_once(
+                session,
+                question=question,
+                provider="openai",
+                model=None,
+                endpoint=None,
+                allow_cloud=False,
+            )
+    assert len(prompts) == 2
+    assert len(calls) == 2
+
+
 def test_ask_once_prints_every_citation_before_long_claim_text(
     monkeypatch: pytest.MonkeyPatch,
     google_export: Path,
@@ -209,29 +317,19 @@ def test_ask_once_prints_every_citation_before_long_claim_text(
         monkeypatch.setattr(
             cli,
             "answer_question",
-            lambda *args, **kwargs: (
-                TransmissionPreview(
-                    provider="local-test",
-                    model="test",
-                    destination="http://127.0.0.1:1234",
-                    record_count=1,
-                    payload_bytes=10,
-                    categories=("account_activity",),
-                ),
-                AIAnswer(
-                    claims=[
-                        AIClaim(
-                            text="x" * 3_000,
-                            kind=AIClaimKind.INFERENCE,
-                            record_ids=["first-record"],
-                        ),
-                        AIClaim(
-                            text="Second claim",
-                            kind=AIClaimKind.OBSERVED,
-                            record_ids=["second-record"],
-                        ),
-                    ],
-                ),
+            lambda *args, **kwargs: AIAnswer(
+                claims=[
+                    AIClaim(
+                        text="x" * 3_000,
+                        kind=AIClaimKind.INFERENCE,
+                        record_ids=["first-record"],
+                    ),
+                    AIClaim(
+                        text="Second claim",
+                        kind=AIClaimKind.OBSERVED,
+                        record_ids=["second-record"],
+                    ),
+                ],
             ),
         )
         cli._ask_once(

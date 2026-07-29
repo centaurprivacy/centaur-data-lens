@@ -10,6 +10,10 @@
       diagnostics, reports, and artifacts.
 - [ ] Cloud destinations use verified TLS, no redirects, no ambient proxies, a
       bounded response, and explicit confirmation.
+- [ ] Cloud preview describes the exact immutable payload and confirmation is
+      required again for every question.
+- [ ] Model payloads exclude source paths, archive identifiers, internal
+      filenames, and API keys.
 - [ ] Model records are bounded and model output cannot execute tools or code.
 - [ ] Ruff, strict mypy, pytest with coverage, package build, and dependency
       audit pass.

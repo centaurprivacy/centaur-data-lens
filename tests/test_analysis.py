@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from centaur_data_lens.analysis import AnalysisSession, SourceSpec, analyze_sources
+from centaur_data_lens.models import NormalizedRecord, SourceReference
 
 
 def test_cross_platform_analysis_and_ephemeral_cleanup(
@@ -54,3 +56,80 @@ def test_diagnostics_contain_counts_not_values(google_export: Path) -> None:
     rendered = str(diagnostics)
     assert "privacy tools" not in rendered
     assert diagnostics["values_included"] is False
+
+
+def _add_large_synthetic_dataset(session: AnalysisSession) -> None:
+    for index in range(240):
+        is_privacy = index < 180
+        platform = "google" if index % 2 == 0 else "meta"
+        category = ("search_history", "browser_history", "advertising")[index % 3]
+        year = 2021 + (index % 5)
+        session.add_record(
+            NormalizedRecord(
+                record_id=f"synthetic-{index:03d}",
+                platform=platform,
+                category=category,
+                activity_type=category.replace("_", " "),
+                service=f"Synthetic Service {index % 6}",
+                timestamp=datetime(year, (index % 12) + 1, 1, tzinfo=UTC),
+                timestamp_precision="provided",
+                title=f"{'privacy' if is_privacy else 'video'} synthetic activity {index}",
+                hostname=f"group-{index % 8}.example",
+                device=f"Synthetic Device {index % 4}",
+                attributes={"synthetic_index": index},
+                sensitivity_tags={"browsing"},
+                sources=(
+                    SourceReference(
+                        archive_id="synthetic-archive",
+                        internal_path="synthetic/activity.json",
+                        pointer=f"/{index}",
+                    ),
+                ),
+            )
+        )
+    session.commit()
+
+
+def test_question_context_uses_full_population_and_diversified_evidence() -> None:
+    with AnalysisSession() as session:
+        _add_large_synthetic_dataset(session)
+        context = session.question_context("privacy")
+
+    assert context.total_records == 240
+    assert context.matching_records == 180
+    assert len(context.records) == 100
+    assert {record.platform for record in context.records} == {"google", "meta"}
+    assert len({record.category for record in context.records}) == 3
+    assert len({record.timestamp.year for record in context.records if record.timestamp}) == 5
+
+    archive_total = next(
+        fact
+        for fact in context.facts
+        if fact.scope == "archive" and fact.metric == "record_count" and not fact.dimensions
+    )
+    matching_total = next(
+        fact
+        for fact in context.facts
+        if fact.scope == "matching" and fact.metric == "record_count" and not fact.dimensions
+    )
+    assert archive_total.value == 240
+    assert matching_total.value == 180
+    assert matching_total.scope_definition.startswith("full_text_query_sha256:")
+
+
+def test_question_context_handles_broad_and_no_match_questions() -> None:
+    with AnalysisSession() as session:
+        _add_large_synthetic_dataset(session)
+        broad = session.question_context("Give me an overview of my data export")
+        missing = session.question_context("quantum zebras")
+        repeated = session.question_context("quantum zebras")
+        different = session.question_context("privacy")
+
+    assert broad.selection_mode == "archive"
+    assert broad.matching_records == 240
+    assert len(broad.records) == 100
+    assert missing.matching_records == 0
+    assert missing.records == ()
+    missing_ids = [fact.fact_id for fact in missing.facts if fact.scope == "matching"]
+    assert missing_ids == [fact.fact_id for fact in repeated.facts if fact.scope == "matching"]
+    assert missing_ids != [fact.fact_id for fact in different.facts if fact.scope == "matching"]

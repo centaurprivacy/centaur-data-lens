@@ -14,7 +14,7 @@ from rich.text import Text
 
 from centaur_data_lens import __version__
 from centaur_data_lens.ai import (
-    ModelAdapter,
+    TransmissionPreview,
     answer_question,
     create_adapter,
     prepare_question,
@@ -167,16 +167,27 @@ def _print_comparison(session: AnalysisSession) -> None:
             _safe_print(empty_message, style="dim")
 
 
-def _print_preview(adapter: ModelAdapter, session: AnalysisSession, question: str) -> None:
-    preview, _, _ = prepare_question(session, question, adapter)
-    console.print(Text("Transmission preview", style="bold yellow"))
+def _print_preview(preview: TransmissionPreview) -> None:
+    style = "bold green" if preview.is_local else "bold yellow"
+    console.print(Text("Transmission preview", style=style))
     _safe_print(f"Provider: {preview.provider}")
     _safe_print(f"Model: {preview.model}")
     _safe_print(f"Destination: {preview.destination}")
-    _safe_print(f"Selected records: {preview.record_count}")
+    _safe_print(f"Destination type: {'local loopback' if preview.is_local else 'cloud'}")
+    _safe_print(f"Data mode: {preview.data_mode}")
+    _safe_print(f"Archive records analyzed locally: {preview.total_records:,}")
+    _safe_print(f"Question-matching records: {preview.matching_records:,}")
+    _safe_print(f"Calculated facts: {preview.fact_count}")
+    _safe_print(f"Selected evidence records: {preview.record_count}")
     _safe_print(f"Payload: {preview.payload_bytes:,} bytes")
-    _safe_print(f"Categories: {', '.join(preview.categories)}")
-    _safe_print("Excluded: the complete archive, media, unsupported categories, and API key")
+    _safe_print(f"Categories: {', '.join(preview.categories) or 'none'}")
+    _safe_print(f"Transmitted fields: {', '.join(preview.transmitted_fields)}", limit=8_000)
+    _safe_print(f"Detected sensitivity classes: {', '.join(preview.sensitivity_classes) or 'none'}")
+    _safe_print(
+        "Excluded: complete archive files, media, unsupported categories, source paths, "
+        "archive identifiers, filenames, and API key",
+        limit=4_000,
+    )
 
 
 def _ask_once(
@@ -194,31 +205,35 @@ def _ask_once(
         endpoint=endpoint,
         prompt_for_key=True,
     )
-    _print_preview(adapter, session, question)
+    prepared = prepare_question(session, question, adapter)
+    _print_preview(prepared.preview)
     confirmed = allow_cloud or adapter.is_local
     if not confirmed:
-        confirmed = bool(
-            questionary.confirm(
-                "Send only this selected context to the destination above?",
-                default=False,
-            ).ask()
+        console.print(
+            Text(
+                "Warning: the question, calculated facts, and selected records may contain "
+                "personal data. The cloud provider may retain or process it under its terms.",
+                style="bold red",
+            )
         )
+        response = questionary.text("Type SEND PERSONAL DATA to authorize this question:").ask()
+        confirmed = response == "SEND PERSONAL DATA"
     if not confirmed:
         _safe_print("Cloud request cancelled.", style="yellow")
         return
-    _, answer = answer_question(
-        session,
-        question=question,
+    answer = answer_question(
+        prepared,
         adapter=adapter,
         allow_cloud=confirmed,
     )
     console.print()
     for claim in answer.claims:
-        _safe_print(
-            f"[{claim.kind.value}] records: {', '.join(claim.record_ids)}",
-            style="bold",
-            limit=4_000,
-        )
+        references: list[str] = []
+        if claim.fact_ids:
+            references.append(f"facts: {', '.join(claim.fact_ids)}")
+        if claim.record_ids:
+            references.append(f"records: {', '.join(claim.record_ids)}")
+        _safe_print(f"[{claim.kind.value}] {'; '.join(references)}", style="bold", limit=8_000)
         _safe_print(claim.text, limit=4_000)
 
 
@@ -260,15 +275,25 @@ def _wizard_ask(session: AnalysisSession) -> None:
     provider = questionary.select(
         "Choose an analysis provider:",
         choices=[
-            Choice("Local Ollama", "ollama"),
-            Choice("My OpenAI API key", "openai"),
-            Choice("My Anthropic API key", "anthropic"),
-            Choice("My Gemini API key", "gemini"),
+            Choice("Local Ollama (recommended; data stays on this device)", "ollama"),
+            Choice("Advanced: send personal data to a cloud model", "advanced-cloud"),
             Choice("Back", "back"),
         ],
     ).ask()
     if not provider or provider == "back":
         return
+    if provider == "advanced-cloud":
+        provider = questionary.select(
+            "Choose a cloud provider for this one question:",
+            choices=[
+                Choice("OpenAI using my API key", "openai"),
+                Choice("Anthropic using my API key", "anthropic"),
+                Choice("Gemini using my API key", "gemini"),
+                Choice("Back", "back"),
+            ],
+        ).ask()
+        if not provider or provider == "back":
+            return
     question = questionary.text("What would you like to know?").ask()
     if not question:
         return
@@ -472,7 +497,13 @@ def ask_command(
     question: Annotated[str | None, typer.Option("--question")] = None,
     model: Annotated[str | None, typer.Option("--model")] = None,
     endpoint: Annotated[str | None, typer.Option("--endpoint")] = None,
-    allow_cloud: Annotated[bool, typer.Option("--allow-cloud")] = False,
+    allow_cloud: Annotated[
+        bool,
+        typer.Option(
+            "--allow-cloud",
+            help="Authorize this one request to send personal data to a non-loopback provider.",
+        ),
+    ] = False,
 ) -> None:
     """Ask one cited question using a local model or your own API key."""
     try:
