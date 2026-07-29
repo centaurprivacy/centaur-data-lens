@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -121,6 +123,9 @@ def test_question_context_handles_broad_and_no_match_questions() -> None:
     with AnalysisSession() as session:
         _add_large_synthetic_dataset(session)
         broad = session.question_context("Give me an overview of my data export")
+        privacy_related = session.question_context("privacy-related activity")
+        incompatible = session.question_context("privacy video")
+        late_meaningful_term = session.question_context(" ".join(["what"] * 25 + ["privacy"]))
         missing = session.question_context("quantum zebras")
         repeated = session.question_context("quantum zebras")
         different = session.question_context("privacy")
@@ -128,8 +133,41 @@ def test_question_context_handles_broad_and_no_match_questions() -> None:
     assert broad.selection_mode == "archive"
     assert broad.matching_records == 240
     assert len(broad.records) == 100
+    assert privacy_related.matching_records == 180
+    assert privacy_related.matching_records == different.matching_records
+    assert incompatible.matching_records == 0
+    assert incompatible.records == ()
+    assert late_meaningful_term.matching_records == 180
     assert missing.matching_records == 0
     assert missing.records == ()
     missing_ids = [fact.fact_id for fact in missing.facts if fact.scope == "matching"]
     assert missing_ids == [fact.fact_id for fact in repeated.facts if fact.scope == "matching"]
     assert missing_ids != [fact.fact_id for fact in different.facts if fact.scope == "matching"]
+
+
+def test_analysis_reports_unique_indexed_and_parsed_counts(tmp_path: Path) -> None:
+    duplicate = {
+        "header": "Search",
+        "title": "Synthetic duplicate",
+        "titleUrl": "https://example.invalid/search",
+        "time": "2025-01-02T03:04:05Z",
+    }
+    export = tmp_path / "duplicates.zip"
+    with zipfile.ZipFile(export, "w") as archive:
+        archive.writestr(
+            "Takeout/My Activity/Search/MyActivity.json",
+            json.dumps([duplicate, duplicate]),
+        )
+
+    progress: list[str] = []
+    with AnalysisSession() as session:
+        counts = analyze_sources(
+            session,
+            [SourceSpec("google", export)],
+            progress=progress.append,
+        )
+        total_records = session.snapshot().total_records
+
+    assert counts == {"google": 1}
+    assert total_records == 1
+    assert progress[-1] == "Indexed 1 unique Google records from 2 parsed entries."

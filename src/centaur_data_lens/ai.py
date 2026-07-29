@@ -30,31 +30,55 @@ Return JSON with this exact shape:
 Observed claims require record evidence. Calculated claims require calculated-fact
 evidence. Inferences require at least one fact or record and must be clearly labelled.
 Never estimate archive-wide quantities from evidence examples. Do not claim the export
-is complete."""
+is complete. Copy fact_id and record_id values exactly; never invent identifiers."""
 
-_AI_ANSWER_JSON_SCHEMA: dict[str, object] = {
-    "type": "object",
-    "properties": {
-        "claims": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "kind": {"type": "string", "enum": ["observed", "inference"]},
-                    "record_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
+
+def _reference_array_schema(valid_ids: frozenset[str] | None) -> dict[str, object]:
+    item_schema: dict[str, object] = {"type": "string"}
+    array_schema: dict[str, object] = {
+        "type": "array",
+        "items": item_schema,
+    }
+    if valid_ids:
+        item_schema["enum"] = sorted(valid_ids)
+    elif valid_ids is not None:
+        array_schema["maxItems"] = 0
+    return array_schema
+
+
+def _answer_json_schema(
+    *,
+    valid_record_ids: frozenset[str] | None = None,
+    valid_fact_ids: frozenset[str] | None = None,
+    allowed_kinds: tuple[str, ...] = ("observed", "calculated", "inference"),
+) -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "kind": {
+                            "type": "string",
+                            "enum": list(allowed_kinds),
+                        },
+                        "record_ids": _reference_array_schema(valid_record_ids),
+                        "fact_ids": _reference_array_schema(valid_fact_ids),
                     },
+                    "required": ["text", "kind", "record_ids", "fact_ids"],
+                    "additionalProperties": False,
                 },
-                "required": ["text", "kind", "record_ids"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["claims"],
-    "additionalProperties": False,
-}
+            }
+        },
+        "required": ["claims"],
+        "additionalProperties": False,
+    }
+
+
+_AI_ANSWER_JSON_SCHEMA = _answer_json_schema()
 
 
 @dataclass(frozen=True)
@@ -88,7 +112,13 @@ class ModelAdapter(Protocol):
     destination: str
     is_local: bool
 
-    def complete(self, *, system: str, user: str) -> str: ...
+    def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        answer_schema: dict[str, object] | None = None,
+    ) -> str: ...
 
 
 class _HTTPAdapter:
@@ -142,14 +172,21 @@ class OllamaAdapter(_HTTPAdapter):
         self.model = _validate_model(model)
         self.destination = _validate_endpoint(endpoint, require_loopback=True)
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        answer_schema: dict[str, object] | None = None,
+    ) -> str:
         data = self._post_json(
             f"{self.destination.rstrip('/')}/api/chat",
             headers={"Content-Type": "application/json"},
             payload={
                 "model": self.model,
                 "stream": False,
-                "format": _AI_ANSWER_JSON_SCHEMA,
+                "format": answer_schema or _AI_ANSWER_JSON_SCHEMA,
+                "options": {"temperature": 0},
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -182,7 +219,13 @@ class OpenAIAdapter(_HTTPAdapter):
         self.name = "openai-compatible" if compatible else "openai"
         self.is_local = _endpoint_is_loopback(self.destination)
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        answer_schema: dict[str, object] | None = None,
+    ) -> str:
         data = self._post_json(
             f"{self.destination.rstrip('/')}/chat/completions",
             headers={
@@ -196,7 +239,7 @@ class OpenAIAdapter(_HTTPAdapter):
                     "json_schema": {
                         "name": "privacy_answer",
                         "strict": True,
-                        "schema": _AI_ANSWER_JSON_SCHEMA,
+                        "schema": answer_schema or _AI_ANSWER_JSON_SCHEMA,
                     },
                 },
                 "messages": [
@@ -234,7 +277,13 @@ class AnthropicAdapter(_HTTPAdapter):
         self._api_key = _validate_key(api_key)
         self.model = _validate_model(model)
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        answer_schema: dict[str, object] | None = None,
+    ) -> str:
         data = self._post_json(
             f"{self.destination}/v1/messages",
             headers={
@@ -250,7 +299,7 @@ class AnthropicAdapter(_HTTPAdapter):
                 "output_config": {
                     "format": {
                         "type": "json_schema",
-                        "schema": _AI_ANSWER_JSON_SCHEMA,
+                        "schema": answer_schema or _AI_ANSWER_JSON_SCHEMA,
                     }
                 },
             },
@@ -284,7 +333,13 @@ class GeminiAdapter(_HTTPAdapter):
         self._api_key = _validate_key(api_key)
         self.model = _validate_model(model)
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        answer_schema: dict[str, object] | None = None,
+    ) -> str:
         model_path = quote(self.model, safe=".-_")
         data = self._post_json(
             f"{self.destination}/v1beta/models/{model_path}:generateContent",
@@ -294,7 +349,7 @@ class GeminiAdapter(_HTTPAdapter):
                 "contents": [{"role": "user", "parts": [{"text": user}]}],
                 "generationConfig": {
                     "responseMimeType": "application/json",
-                    "responseJsonSchema": _AI_ANSWER_JSON_SCHEMA,
+                    "responseJsonSchema": answer_schema or _AI_ANSWER_JSON_SCHEMA,
                 },
             },
         )
@@ -452,6 +507,30 @@ def _fact_context(fact: CalculatedFact) -> dict[str, object]:
     return fact.model_dump(mode="json")
 
 
+def _fact_sensitivity_classes(facts: list[CalculatedFact]) -> set[str]:
+    if not facts:
+        return set()
+    classes = {"derived"}
+    for fact in facts:
+        dimensions = fact.dimensions
+        if "device" in dimensions:
+            classes.add("device")
+        if "hostname" in dimensions or "service" in dimensions:
+            classes.add("browsing")
+        category = dimensions.get("category", "").lower()
+        if any(value in category for value in ("advertis", "interest", "ads")):
+            classes.add("advertising")
+        if any(value in category for value in ("search", "browser", "activity", "youtube")):
+            classes.add("browsing")
+        if any(value in category for value in ("device", "login", "session")):
+            classes.add("device")
+        if any(value in category for value in ("profile", "account", "identity")):
+            classes.add("identity")
+        if any(value in category for value in ("location", "place", "map")):
+            classes.add("location")
+    return classes
+
+
 def prepare_question(
     session: AnalysisSession,
     question: str,
@@ -536,7 +615,7 @@ def prepare_question(
     }
     for item in record_contexts:
         transmitted_fields.update(f"evidence_records.{key}" for key in item)
-    sensitivity_classes = {
+    sensitivity_classes = _fact_sensitivity_classes(included_facts) | {
         sensitivity for record in included_records for sensitivity in record.sensitivity_tags
     }
     preview = TransmissionPreview(
@@ -562,23 +641,7 @@ def prepare_question(
     )
 
 
-def answer_question(
-    prepared: PreparedQuestion,
-    *,
-    adapter: ModelAdapter,
-    allow_cloud: bool,
-) -> AIAnswer:
-    preview = prepared.preview
-    if (
-        preview.provider != adapter.name
-        or preview.model != adapter.model
-        or preview.destination != adapter.destination
-        or preview.is_local != adapter.is_local
-    ):
-        raise ModelAdapterError("The prepared question does not match the selected model.")
-    if not adapter.is_local and not allow_cloud:
-        raise ModelAdapterError("Cloud transmission was not confirmed.")
-    raw = adapter.complete(system=SYSTEM_PROMPT, user=prepared.payload)
+def _validated_answer(raw: str, prepared: PreparedQuestion) -> AIAnswer:
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE)
@@ -600,3 +663,51 @@ def answer_question(
         if claim.kind == AIClaimKind.INFERENCE and not (claim.record_ids or claim.fact_ids):
             raise ModelAdapterError("An inference requires supporting evidence.")
     return answer
+
+
+def answer_question(
+    prepared: PreparedQuestion,
+    *,
+    adapter: ModelAdapter,
+    allow_cloud: bool,
+) -> AIAnswer:
+    preview = prepared.preview
+    if (
+        preview.provider != adapter.name
+        or preview.model != adapter.model
+        or preview.destination != adapter.destination
+        or preview.is_local != adapter.is_local
+    ):
+        raise ModelAdapterError("The prepared question does not match the selected model.")
+    if not adapter.is_local and not allow_cloud:
+        raise ModelAdapterError("Cloud transmission was not confirmed.")
+    answer_schema = _answer_json_schema(
+        valid_record_ids=prepared.valid_record_ids,
+        valid_fact_ids=prepared.valid_fact_ids,
+    )
+    raw = adapter.complete(
+        system=SYSTEM_PROMPT,
+        user=prepared.payload,
+        answer_schema=answer_schema,
+    )
+    try:
+        return _validated_answer(raw, prepared)
+    except ModelAdapterError:
+        if not adapter.is_local:
+            raise
+    retry_prompt = (
+        f"{SYSTEM_PROMPT}\n"
+        "Your previous response failed local validation. Return a new answer with at least one "
+        "inference claim and at least one allowed fact_id or record_id. Use kind inference and "
+        "only identifiers allowed by the schema."
+    )
+    retry_raw = adapter.complete(
+        system=retry_prompt,
+        user=prepared.payload,
+        answer_schema=_answer_json_schema(
+            valid_record_ids=prepared.valid_record_ids,
+            valid_fact_ids=prepared.valid_fact_ids,
+            allowed_kinds=("inference",),
+        ),
+    )
+    return _validated_answer(retry_raw, prepared)

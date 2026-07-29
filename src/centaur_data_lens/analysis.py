@@ -27,14 +27,18 @@ from centaur_data_lens.platforms import get_platform
 from centaur_data_lens.security import cleanup_stale_sessions, secure_temp_directory
 
 ProgressCallback = Callable[[str], None]
-_FTS_TOKEN_RE = re.compile(r"[\w.-]+", re.UNICODE)
+_FTS_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 _QUESTION_STOP_WORDS = frozenset(
     {
         "a",
         "about",
+        "activities",
+        "activity",
         "all",
         "an",
         "and",
+        "appear",
+        "appears",
         "are",
         "can",
         "data",
@@ -46,13 +50,19 @@ _QUESTION_STOP_WORDS = frozenset(
         "have",
         "i",
         "in",
+        "information",
         "is",
+        "know",
         "me",
         "my",
         "of",
         "on",
         "overview",
         "please",
+        "record",
+        "records",
+        "related",
+        "searches",
         "show",
         "tell",
         "the",
@@ -163,15 +173,16 @@ class QuestionContext:
     records: tuple[NormalizedRecord, ...]
 
 
-def _fts_query(question: str) -> str | None:
+def _fts_query(question: str, *, require_all: bool = False) -> str | None:
     tokens = [
         token
-        for token in _FTS_TOKEN_RE.findall(question.lower())[:20]
+        for token in _FTS_TOKEN_RE.findall(question.lower())
         if token not in _QUESTION_STOP_WORDS
-    ]
+    ][:20]
     if not tokens:
         return None
-    return " OR ".join(f'"{token.replace(chr(34), "")}"' for token in tokens)
+    operator = " AND " if require_all else " OR "
+    return operator.join(f'"{token.replace(chr(34), "")}"' for token in tokens)
 
 
 def _fact(
@@ -254,7 +265,7 @@ class AnalysisSession:
     def database_path(self) -> Path:
         return self._database_path
 
-    def add_record(self, record: NormalizedRecord) -> None:
+    def add_record(self, record: NormalizedRecord) -> bool:
         existing_row = self._connection.execute(
             "SELECT payload FROM records WHERE record_id = ?", (record.record_id,)
         ).fetchone()
@@ -266,7 +277,7 @@ class AnalysisSession:
                 "UPDATE records SET payload = ? WHERE record_id = ?",
                 (merged.model_dump_json(), record.record_id),
             )
-            return
+            return False
 
         attributes = " ".join(str(value) for value in record.attributes.values())
         self._connection.execute(
@@ -303,6 +314,7 @@ class AnalysisSession:
                 attributes,
             ),
         )
+        return True
 
     def commit(self) -> None:
         self._connection.commit()
@@ -629,14 +641,14 @@ class AnalysisSession:
         evidence_limit: int = 100,
     ) -> QuestionContext:
         total_records = self._matching_count(None)
-        query = _fts_query(question)
-        matching_records = self._matching_count(query)
+        aggregate_query = _fts_query(question, require_all=True)
+        matching_records = self._matching_count(aggregate_query)
         archive_facts = self._scope_facts(
             scope="archive",
             query=None,
             record_count=total_records,
         )
-        if query is None:
+        if aggregate_query is None:
             facts = [
                 archive_facts[0],
                 _fact(
@@ -650,17 +662,17 @@ class AnalysisSession:
         else:
             matching_facts = self._scope_facts(
                 scope="matching",
-                query=query,
+                query=aggregate_query,
                 record_count=matching_records,
             )
             facts = [archive_facts[0], matching_facts[0]]
             facts.extend(matching_facts[1:])
             facts.extend(archive_facts[1:])
-        candidates = self._candidate_records(query, limit=candidate_limit)
+        candidates = self._candidate_records(aggregate_query, limit=candidate_limit)
         return QuestionContext(
             total_records=total_records,
             matching_records=matching_records,
-            selection_mode="archive" if query is None else "full_text",
+            selection_mode="archive" if aggregate_query is None else "full_text_all_terms",
             facts=tuple(facts),
             records=self._diversify(candidates, limit=evidence_limit),
         )
@@ -833,14 +845,19 @@ def analyze_sources(
         parser = get_platform(platform_id)
         if progress:
             progress(f"Validating {parser.definition.display_name} export…")
-        count = 0
+        parsed_count = 0
+        indexed_count = 0
         with ArchiveReader(paths, allow_large_archive=allow_large_archive) as reader:
             parser.validate(reader)
             for record in parser.iter_records(reader):
-                session.add_record(record)
-                count += 1
-        counts[platform_id] = count
+                parsed_count += 1
+                if session.add_record(record):
+                    indexed_count += 1
+        counts[platform_id] = indexed_count
         if progress:
-            progress(f"Indexed {count:,} {parser.definition.display_name} records.")
+            progress(
+                f"Indexed {indexed_count:,} unique {parser.definition.display_name} records "
+                f"from {parsed_count:,} parsed entries."
+            )
     session.commit()
     return counts

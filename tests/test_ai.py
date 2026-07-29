@@ -28,9 +28,17 @@ class FakeAdapter:
     def __init__(self, response: dict[str, object]) -> None:
         self.response = response
         self.calls = 0
+        self.answer_schema: dict[str, object] | None = None
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        answer_schema: dict[str, object] | None = None,
+    ) -> str:
         self.calls += 1
+        self.answer_schema = answer_schema
         assert "untrusted data" in system
         assert "record_ids" in system
         assert "fact_ids" in system
@@ -51,7 +59,16 @@ def assert_answer_schema(schema: object) -> None:
     assert isinstance(claims, dict)
     item = claims["items"]
     assert isinstance(item, dict)
-    assert item["required"] == ["text", "kind", "record_ids"]
+    variant_properties = item["properties"]
+    assert isinstance(variant_properties, dict)
+    kind = variant_properties["kind"]
+    assert isinstance(kind, dict)
+    assert kind["enum"] == ["observed", "calculated", "inference"]
+    fact_ids = variant_properties["fact_ids"]
+    assert isinstance(fact_ids, dict)
+    assert fact_ids["type"] == "array"
+    assert fact_ids["items"] == {"type": "string"}
+    assert item["required"] == ["text", "kind", "record_ids", "fact_ids"]
     assert item["additionalProperties"] is False
 
 
@@ -198,6 +215,74 @@ def test_calculated_claim_requires_fact_evidence(google_export: Path) -> None:
                 adapter=adapter,
                 allow_cloud=True,
             )
+    assert adapter.calls == 1
+
+
+def test_local_model_retries_one_invalid_citation_contract(google_export: Path) -> None:
+    class LocalSequenceAdapter(FakeAdapter):
+        destination = "http://127.0.0.1:11434"
+        is_local = True
+
+        def __init__(self) -> None:
+            super().__init__({"claims": []})
+            self.responses: list[dict[str, object]] = []
+
+        def complete(
+            self,
+            *,
+            system: str,
+            user: str,
+            answer_schema: dict[str, object] | None = None,
+        ) -> str:
+            self.response = self.responses[self.calls]
+            return super().complete(
+                system=system,
+                user=user,
+                answer_schema=answer_schema,
+            )
+
+    adapter = LocalSequenceAdapter()
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        prepared = prepare_question(session, "privacy", adapter)
+        record_id = next(iter(prepared.valid_record_ids))
+        adapter.responses = [
+            {
+                "claims": [
+                    {
+                        "text": "Wrong evidence type.",
+                        "kind": "calculated",
+                        "record_ids": [record_id],
+                        "fact_ids": [],
+                    }
+                ]
+            },
+            {
+                "claims": [
+                    {
+                        "text": "Corrected evidence type.",
+                        "kind": "inference",
+                        "record_ids": [record_id],
+                        "fact_ids": [],
+                    }
+                ]
+            },
+        ]
+        answer = answer_question(prepared, adapter=adapter, allow_cloud=False)
+    assert adapter.calls == 2
+    assert answer.claims[0].kind.value == "inference"
+    assert adapter.answer_schema is not None
+    properties = adapter.answer_schema["properties"]
+    assert isinstance(properties, dict)
+    claims = properties["claims"]
+    assert isinstance(claims, dict)
+    item = claims["items"]
+    assert isinstance(item, dict)
+    claim_properties = item["properties"]
+    assert isinstance(claim_properties, dict)
+    kind = claim_properties["kind"]
+    assert isinstance(kind, dict)
+    assert kind["enum"] == ["inference"]
 
 
 def test_calculated_claim_accepts_valid_fact_evidence(google_export: Path) -> None:
@@ -217,6 +302,20 @@ def test_calculated_claim_accepts_valid_fact_evidence(google_export: Path) -> No
         }
         answer = answer_question(prepared, adapter=adapter, allow_cloud=True)
     assert answer.claims[0].fact_ids == [fact_id]
+    assert adapter.answer_schema is not None
+    properties = adapter.answer_schema["properties"]
+    assert isinstance(properties, dict)
+    claims = properties["claims"]
+    assert isinstance(claims, dict)
+    item = claims["items"]
+    assert isinstance(item, dict)
+    claim_properties = item["properties"]
+    assert isinstance(claim_properties, dict)
+    fact_ids = claim_properties["fact_ids"]
+    assert isinstance(fact_ids, dict)
+    fact_items = fact_ids["items"]
+    assert isinstance(fact_items, dict)
+    assert set(fact_items["enum"]) == prepared.valid_fact_ids
 
 
 def test_rejects_fabricated_fact_citation(google_export: Path) -> None:
@@ -246,11 +345,36 @@ def test_no_match_question_still_has_archive_facts(google_export: Path) -> None:
     decoded = json.loads(prepared.payload)
     assert prepared.preview.matching_records == 0
     assert prepared.preview.record_count == 0
+    assert {"derived", "browsing", "device"} <= set(prepared.preview.sensitivity_classes)
     assert decoded["evidence_records"] == []
     assert any(
         fact["scope"] == "matching" and fact["metric"] == "record_count" and fact["value"] == 0
         for fact in decoded["calculated_facts"]
     )
+    fact_id = next(iter(prepared.valid_fact_ids))
+    adapter.response = {
+        "claims": [
+            {
+                "text": "No exact records matched.",
+                "kind": "calculated",
+                "record_ids": [],
+                "fact_ids": [fact_id],
+            }
+        ]
+    }
+    answer_question(prepared, adapter=adapter, allow_cloud=True)
+    assert adapter.answer_schema is not None
+    properties = adapter.answer_schema["properties"]
+    assert isinstance(properties, dict)
+    claims = properties["claims"]
+    assert isinstance(claims, dict)
+    item = claims["items"]
+    assert isinstance(item, dict)
+    claim_properties = item["properties"]
+    assert isinstance(claim_properties, dict)
+    record_ids = claim_properties["record_ids"]
+    assert isinstance(record_ids, dict)
+    assert record_ids["maxItems"] == 0
 
 
 def test_observed_claim_requires_evidence(google_export: Path) -> None:
@@ -366,6 +490,7 @@ def test_ollama_requests_structured_output(monkeypatch: pytest.MonkeyPatch) -> N
     payload = captured["payload"]
     assert isinstance(payload, dict)
     assert_answer_schema(payload["format"])
+    assert payload["options"] == {"temperature": 0}
 
 
 def test_openai_requests_strict_structured_output(
