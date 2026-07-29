@@ -223,7 +223,10 @@ def test_cloud_question_requires_exact_typed_confirmation(
         destination = "https://provider.invalid"
         is_local = False
 
-        def complete(self, *, system: str, user: str) -> str:
+        def build_request_body(self, **kwargs) -> bytes:
+            return b'{"synthetic":true}'
+
+        def complete(self, *, request_body: bytes) -> str:
             raise AssertionError("mock answer_question should be used")
 
     with AnalysisSession() as session:
@@ -265,7 +268,10 @@ def test_cloud_confirmation_is_per_question(
         destination = "https://provider.invalid"
         is_local = False
 
-        def complete(self, *, system: str, user: str) -> str:
+        def build_request_body(self, **kwargs) -> bytes:
+            return b'{"synthetic":true}'
+
+        def complete(self, *, request_body: bytes) -> str:
             raise AssertionError("mock answer_question should be used")
 
     prompts: list[str] = []
@@ -297,6 +303,44 @@ def test_cloud_confirmation_is_per_question(
     assert len(calls) == 2
 
 
+def test_cloud_no_match_is_answered_locally_without_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    google_export: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class CloudAdapter:
+        name = "cloud-test"
+        model = "test"
+        destination = "https://provider.invalid"
+        is_local = False
+
+        def build_request_body(self, **kwargs) -> bytes:
+            return b'{"synthetic":true}'
+
+        def complete(self, *, request_body: bytes) -> str:
+            raise AssertionError("No model request should be made for a no-match question.")
+
+    def unexpected_prompt(*args, **kwargs):
+        raise AssertionError("No cloud confirmation should be requested for a local answer.")
+
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        monkeypatch.setattr(cli, "create_adapter", lambda *args, **kwargs: CloudAdapter())
+        monkeypatch.setattr(cli.questionary, "text", unexpected_prompt)
+        cli._ask_once(
+            session,
+            question="quantum zebras",
+            provider="openai",
+            model=None,
+            endpoint=None,
+            allow_cloud=False,
+        )
+
+    output = capsys.readouterr().out
+    assert "Model request: none" in output
+    assert "No matching records were found" in output
+
+
 def test_ask_once_prints_every_citation_before_long_claim_text(
     monkeypatch: pytest.MonkeyPatch,
     google_export: Path,
@@ -308,7 +352,10 @@ def test_ask_once_prints_every_citation_before_long_claim_text(
         destination = "http://127.0.0.1:1234"
         is_local = True
 
-        def complete(self, *, system: str, user: str) -> str:
+        def build_request_body(self, **kwargs) -> bytes:
+            return b'{"synthetic":true}'
+
+        def complete(self, *, request_body: bytes) -> str:
             raise AssertionError("mock answer_question should be used")
 
     with AnalysisSession() as session:

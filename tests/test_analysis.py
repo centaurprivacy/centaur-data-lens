@@ -137,12 +137,31 @@ def test_question_context_handles_broad_and_no_match_questions() -> None:
     assert privacy_related.matching_records == different.matching_records
     assert incompatible.matching_records == 0
     assert incompatible.records == ()
+    assert len(incompatible.facts) == 1
+    assert incompatible.facts[0].scope == "matching"
     assert late_meaningful_term.matching_records == 180
     assert missing.matching_records == 0
     assert missing.records == ()
     missing_ids = [fact.fact_id for fact in missing.facts if fact.scope == "matching"]
     assert missing_ids == [fact.fact_id for fact in repeated.facts if fact.scope == "matching"]
     assert missing_ids != [fact.fact_id for fact in different.facts if fact.scope == "matching"]
+
+
+def test_natural_question_modifiers_preserve_search_and_facet_intent() -> None:
+    with AnalysisSession() as session:
+        _add_large_synthetic_dataset(session)
+        searches = session.question_context("What did I search for?")
+        devices = session.question_context("Which devices are present?")
+        services = session.question_context("What services appear most often?")
+
+    assert searches.selection_mode == "full_text_all_terms"
+    assert searches.matching_records == 80
+    assert searches.records
+    assert {record.category for record in searches.records} == {"search_history"}
+    for context in (devices, services):
+        assert context.selection_mode == "full_text_all_terms"
+        assert context.matching_records == 240
+        assert len(context.records) == 100
 
 
 def test_analysis_reports_unique_indexed_and_parsed_counts(tmp_path: Path) -> None:

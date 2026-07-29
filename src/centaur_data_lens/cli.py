@@ -179,7 +179,10 @@ def _print_preview(preview: TransmissionPreview) -> None:
     _safe_print(f"Question-matching records: {preview.matching_records:,}")
     _safe_print(f"Calculated facts: {preview.fact_count}")
     _safe_print(f"Selected evidence records: {preview.record_count}")
-    _safe_print(f"Payload: {preview.payload_bytes:,} bytes")
+    if preview.will_transmit:
+        _safe_print(f"Complete provider request body: {preview.payload_bytes:,} bytes")
+    else:
+        _safe_print("Model request: none (answered locally because no records matched)")
     _safe_print(f"Categories: {', '.join(preview.categories) or 'none'}")
     _safe_print(f"Transmitted fields: {', '.join(preview.transmitted_fields)}", limit=8_000)
     _safe_print(f"Detected sensitivity classes: {', '.join(preview.sensitivity_classes) or 'none'}")
@@ -207,7 +210,7 @@ def _ask_once(
     )
     prepared = prepare_question(session, question, adapter)
     _print_preview(prepared.preview)
-    confirmed = allow_cloud or adapter.is_local
+    confirmed = allow_cloud or adapter.is_local or not prepared.preview.will_transmit
     if not confirmed:
         console.print(
             Text(

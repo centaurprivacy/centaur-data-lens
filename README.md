@@ -60,7 +60,10 @@ centaur-data-lens ask \
 For non-interactive cloud use, the provider must be selected explicitly and
 `--allow-cloud` must be supplied for that one request. Cloud payloads can contain
 the question, personal derived statistics, and selected raw records. Source
-paths, archive identifiers, filenames, and API keys are never included.
+paths, archive identifiers, filenames, and API keys are never included. The
+preview measures the immutable provider request body, including the system
+prompt, static response schema, and provider envelope. Questions with no
+matching records are answered locally without a model request.
 
 Google and Meta exports must be requested in JSON format. The CLI explains the
 currently supported categories with `guide google` and `guide meta`.

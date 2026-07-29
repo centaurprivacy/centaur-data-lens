@@ -14,9 +14,15 @@ from pydantic import ValidationError
 
 from centaur_data_lens.analysis import AnalysisSession
 from centaur_data_lens.errors import ModelAdapterError
-from centaur_data_lens.models import AIAnswer, AIClaimKind, CalculatedFact, NormalizedRecord
+from centaur_data_lens.models import (
+    AIAnswer,
+    AIClaim,
+    AIClaimKind,
+    CalculatedFact,
+    NormalizedRecord,
+)
 
-_MAX_PAYLOAD_BYTES = 256 * 1024
+_MAX_REQUEST_BYTES = 256 * 1024
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,160}$")
 
@@ -30,7 +36,8 @@ Return JSON with this exact shape:
 Observed claims require record evidence. Calculated claims require calculated-fact
 evidence. Inferences require at least one fact or record and must be clearly labelled.
 Never estimate archive-wide quantities from evidence examples. Do not claim the export
-is complete. Copy fact_id and record_id values exactly; never invent identifiers."""
+is complete. Copy fact_id and record_id values exactly; never invent identifiers.
+If scope.selection_mode is no_match, state only that no matching records were found."""
 
 
 def _reference_array_schema(valid_ids: frozenset[str] | None) -> dict[str, object]:
@@ -96,14 +103,17 @@ class TransmissionPreview:
     categories: tuple[str, ...]
     transmitted_fields: tuple[str, ...]
     sensitivity_classes: tuple[str, ...]
+    will_transmit: bool
 
 
 @dataclass(frozen=True)
 class PreparedQuestion:
     preview: TransmissionPreview
     payload: str
+    request_body: bytes
     valid_fact_ids: frozenset[str]
     valid_record_ids: frozenset[str]
+    local_answer: AIAnswer | None = None
 
 
 class ModelAdapter(Protocol):
@@ -112,13 +122,23 @@ class ModelAdapter(Protocol):
     destination: str
     is_local: bool
 
-    def complete(
+    def build_request_body(
         self,
         *,
         system: str,
         user: str,
         answer_schema: dict[str, object] | None = None,
-    ) -> str: ...
+    ) -> bytes: ...
+
+    def complete(self, *, request_body: bytes) -> str: ...
+
+
+def _json_bytes(value: dict[str, object]) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
 
 
 class _HTTPAdapter:
@@ -132,7 +152,7 @@ class _HTTPAdapter:
         url: str,
         *,
         headers: dict[str, str],
-        payload: dict[str, object],
+        content: bytes,
     ) -> dict[str, object]:
         try:
             with (
@@ -142,7 +162,7 @@ class _HTTPAdapter:
                     trust_env=False,
                     limits=httpx.Limits(max_connections=2, max_keepalive_connections=1),
                 ) as client,
-                client.stream("POST", url, headers=headers, json=payload) as response,
+                client.stream("POST", url, headers=headers, content=content) as response,
             ):
                 if response.is_redirect:
                     raise ModelAdapterError("The model endpoint attempted an unsafe redirect.")
@@ -172,17 +192,15 @@ class OllamaAdapter(_HTTPAdapter):
         self.model = _validate_model(model)
         self.destination = _validate_endpoint(endpoint, require_loopback=True)
 
-    def complete(
+    def build_request_body(
         self,
         *,
         system: str,
         user: str,
         answer_schema: dict[str, object] | None = None,
-    ) -> str:
-        data = self._post_json(
-            f"{self.destination.rstrip('/')}/api/chat",
-            headers={"Content-Type": "application/json"},
-            payload={
+    ) -> bytes:
+        return _json_bytes(
+            {
                 "model": self.model,
                 "stream": False,
                 "format": answer_schema or _AI_ANSWER_JSON_SCHEMA,
@@ -191,7 +209,14 @@ class OllamaAdapter(_HTTPAdapter):
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-            },
+            }
+        )
+
+    def complete(self, *, request_body: bytes) -> str:
+        data = self._post_json(
+            f"{self.destination.rstrip('/')}/api/chat",
+            headers={"Content-Type": "application/json"},
+            content=request_body,
         )
         if data.get("done_reason") == "length":
             raise ModelAdapterError("Ollama reached the output limit before completing its answer.")
@@ -219,20 +244,15 @@ class OpenAIAdapter(_HTTPAdapter):
         self.name = "openai-compatible" if compatible else "openai"
         self.is_local = _endpoint_is_loopback(self.destination)
 
-    def complete(
+    def build_request_body(
         self,
         *,
         system: str,
         user: str,
         answer_schema: dict[str, object] | None = None,
-    ) -> str:
-        data = self._post_json(
-            f"{self.destination.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            payload={
+    ) -> bytes:
+        return _json_bytes(
+            {
                 "model": self.model,
                 "response_format": {
                     "type": "json_schema",
@@ -246,7 +266,17 @@ class OpenAIAdapter(_HTTPAdapter):
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
+            }
+        )
+
+    def complete(self, *, request_body: bytes) -> str:
+        data = self._post_json(
+            f"{self.destination.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
             },
+            content=request_body,
         )
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
@@ -277,21 +307,15 @@ class AnthropicAdapter(_HTTPAdapter):
         self._api_key = _validate_key(api_key)
         self.model = _validate_model(model)
 
-    def complete(
+    def build_request_body(
         self,
         *,
         system: str,
         user: str,
         answer_schema: dict[str, object] | None = None,
-    ) -> str:
-        data = self._post_json(
-            f"{self.destination}/v1/messages",
-            headers={
-                "x-api-key": self._api_key,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            },
-            payload={
+    ) -> bytes:
+        return _json_bytes(
+            {
                 "model": self.model,
                 "max_tokens": 1_500,
                 "system": system,
@@ -302,7 +326,18 @@ class AnthropicAdapter(_HTTPAdapter):
                         "schema": answer_schema or _AI_ANSWER_JSON_SCHEMA,
                     }
                 },
+            }
+        )
+
+    def complete(self, *, request_body: bytes) -> str:
+        data = self._post_json(
+            f"{self.destination}/v1/messages",
+            headers={
+                "x-api-key": self._api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
             },
+            content=request_body,
         )
         stop_reason = data.get("stop_reason")
         if stop_reason == "max_tokens":
@@ -333,25 +368,30 @@ class GeminiAdapter(_HTTPAdapter):
         self._api_key = _validate_key(api_key)
         self.model = _validate_model(model)
 
-    def complete(
+    def build_request_body(
         self,
         *,
         system: str,
         user: str,
         answer_schema: dict[str, object] | None = None,
-    ) -> str:
-        model_path = quote(self.model, safe=".-_")
-        data = self._post_json(
-            f"{self.destination}/v1beta/models/{model_path}:generateContent",
-            headers={"x-goog-api-key": self._api_key, "Content-Type": "application/json"},
-            payload={
+    ) -> bytes:
+        return _json_bytes(
+            {
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": user}]}],
                 "generationConfig": {
                     "responseMimeType": "application/json",
                     "responseJsonSchema": answer_schema or _AI_ANSWER_JSON_SCHEMA,
                 },
-            },
+            }
+        )
+
+    def complete(self, *, request_body: bytes) -> str:
+        model_path = quote(self.model, safe=".-_")
+        data = self._post_json(
+            f"{self.destination}/v1beta/models/{model_path}:generateContent",
+            headers={"x-goog-api-key": self._api_key, "Content-Type": "application/json"},
+            content=request_body,
         )
         prompt_feedback = data.get("promptFeedback")
         if isinstance(prompt_feedback, dict):
@@ -536,6 +576,8 @@ def prepare_question(
     question: str,
     adapter: ModelAdapter,
 ) -> PreparedQuestion:
+    if len(question.encode()) > _MAX_REQUEST_BYTES:
+        raise ModelAdapterError("The question exceeds the safe request size limit.")
     context = session.question_context(question)
     if context.total_records == 0:
         raise ModelAdapterError("No supported records are available to answer this question.")
@@ -547,53 +589,104 @@ def prepare_question(
     }
 
     def serialize(
-        facts: list[dict[str, object]],
-        records: list[dict[str, object]],
-    ) -> tuple[str, int]:
+        facts: list[CalculatedFact],
+        records: list[NormalizedRecord],
+    ) -> tuple[str, bytes]:
         rendered = json.dumps(
             {
                 "question": question,
                 "scope": scope,
-                "calculated_facts": facts,
-                "evidence_records": records,
+                "calculated_facts": [_fact_context(fact) for fact in facts],
+                "evidence_records": [_record_context(record) for record in records],
             },
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        return rendered, len(rendered.encode())
+        answer_schema = (
+            _answer_json_schema(
+                valid_record_ids=frozenset(record.record_id for record in records),
+                valid_fact_ids=frozenset(fact.fact_id for fact in facts),
+            )
+            if adapter.is_local
+            else _AI_ANSWER_JSON_SCHEMA
+        )
+        return rendered, adapter.build_request_body(
+            system=SYSTEM_PROMPT,
+            user=rendered,
+            answer_schema=answer_schema,
+        )
 
-    payload, payload_bytes = serialize([], [])
-    if payload_bytes > _MAX_PAYLOAD_BYTES:
+    if context.selection_mode == "no_match":
+        no_match_fact = context.facts[0]
+        payload = json.dumps(
+            {
+                "question": question,
+                "scope": scope,
+                "calculated_facts": [_fact_context(no_match_fact)],
+                "evidence_records": [],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        local_answer = AIAnswer(
+            claims=[
+                AIClaim(
+                    text="No matching records were found for this question.",
+                    kind=AIClaimKind.CALCULATED,
+                    record_ids=[],
+                    fact_ids=[no_match_fact.fact_id],
+                )
+            ]
+        )
+        return PreparedQuestion(
+            preview=TransmissionPreview(
+                provider=adapter.name,
+                model=adapter.model,
+                destination=adapter.destination,
+                is_local=adapter.is_local,
+                data_mode="local_no_match",
+                total_records=context.total_records,
+                matching_records=0,
+                fact_count=0,
+                record_count=0,
+                payload_bytes=0,
+                categories=(),
+                transmitted_fields=(),
+                sensitivity_classes=(),
+                will_transmit=False,
+            ),
+            payload=payload,
+            request_body=b"",
+            valid_fact_ids=frozenset({no_match_fact.fact_id}),
+            valid_record_ids=frozenset(),
+            local_answer=local_answer,
+        )
+
+    payload, request_body = serialize([], [])
+    if len(request_body) > _MAX_REQUEST_BYTES:
         raise ModelAdapterError("The question exceeds the safe request size limit.")
 
-    fact_contexts: list[dict[str, object]] = []
     included_facts: list[CalculatedFact] = []
     for fact in context.facts:
-        candidate = _fact_context(fact)
-        candidate_payload, candidate_bytes = serialize([*fact_contexts, candidate], [])
-        if candidate_bytes > _MAX_PAYLOAD_BYTES:
+        candidate_facts = [*included_facts, fact]
+        candidate_payload, candidate_body = serialize(candidate_facts, [])
+        if len(candidate_body) > _MAX_REQUEST_BYTES:
             break
-        fact_contexts.append(candidate)
-        included_facts.append(fact)
+        included_facts = candidate_facts
         payload = candidate_payload
-        payload_bytes = candidate_bytes
+        request_body = candidate_body
     if len(included_facts) < 2:
         raise ModelAdapterError("The question leaves no room for required analysis context.")
 
-    record_contexts: list[dict[str, object]] = []
     included_records: list[NormalizedRecord] = []
     for record in context.records:
-        candidate = _record_context(record)
-        candidate_payload, candidate_bytes = serialize(
-            fact_contexts,
-            [*record_contexts, candidate],
-        )
-        if candidate_bytes > _MAX_PAYLOAD_BYTES:
+        candidate_records = [*included_records, record]
+        candidate_payload, candidate_body = serialize(included_facts, candidate_records)
+        if len(candidate_body) > _MAX_REQUEST_BYTES:
             continue
-        record_contexts.append(candidate)
-        included_records.append(record)
+        included_records = candidate_records
         payload = candidate_payload
-        payload_bytes = candidate_bytes
+        request_body = candidate_body
 
     categories = {record.category for record in included_records} | {
         category
@@ -612,8 +705,11 @@ def prepare_question(
         "calculated_facts.value",
         "calculated_facts.dimensions",
         "calculated_facts.provenance",
+        "request.provider_envelope",
+        "request.structured_output_schema",
+        "request.system_prompt",
     }
-    for item in record_contexts:
+    for item in (_record_context(record) for record in included_records):
         transmitted_fields.update(f"evidence_records.{key}" for key in item)
     sensitivity_classes = _fact_sensitivity_classes(included_facts) | {
         sensitivity for record in included_records for sensitivity in record.sensitivity_tags
@@ -628,14 +724,16 @@ def prepare_question(
         matching_records=context.matching_records,
         fact_count=len(included_facts),
         record_count=len(included_records),
-        payload_bytes=payload_bytes,
+        payload_bytes=len(request_body),
         categories=tuple(sorted(categories)),
         transmitted_fields=tuple(sorted(transmitted_fields)),
         sensitivity_classes=tuple(sorted(sensitivity_classes)),
+        will_transmit=True,
     )
     return PreparedQuestion(
         preview=preview,
         payload=payload,
+        request_body=request_body,
         valid_fact_ids=frozenset(fact.fact_id for fact in included_facts),
         valid_record_ids=frozenset(record.record_id for record in included_records),
     )
@@ -679,17 +777,13 @@ def answer_question(
         or preview.is_local != adapter.is_local
     ):
         raise ModelAdapterError("The prepared question does not match the selected model.")
+    if prepared.local_answer is not None:
+        return prepared.local_answer
     if not adapter.is_local and not allow_cloud:
         raise ModelAdapterError("Cloud transmission was not confirmed.")
-    answer_schema = _answer_json_schema(
-        valid_record_ids=prepared.valid_record_ids,
-        valid_fact_ids=prepared.valid_fact_ids,
-    )
-    raw = adapter.complete(
-        system=SYSTEM_PROMPT,
-        user=prepared.payload,
-        answer_schema=answer_schema,
-    )
+    if not prepared.request_body or len(prepared.request_body) > _MAX_REQUEST_BYTES:
+        raise ModelAdapterError("The prepared model request is invalid.")
+    raw = adapter.complete(request_body=prepared.request_body)
     try:
         return _validated_answer(raw, prepared)
     except ModelAdapterError:
@@ -701,7 +795,7 @@ def answer_question(
         "inference claim and at least one allowed fact_id or record_id. Use kind inference and "
         "only identifiers allowed by the schema."
     )
-    retry_raw = adapter.complete(
+    retry_body = adapter.build_request_body(
         system=retry_prompt,
         user=prepared.payload,
         answer_schema=_answer_json_schema(
@@ -710,4 +804,7 @@ def answer_question(
             allowed_kinds=("inference",),
         ),
     )
+    if len(retry_body) > _MAX_REQUEST_BYTES:
+        raise ModelAdapterError("The local model retry exceeds the safe request size limit.")
+    retry_raw = adapter.complete(request_body=retry_body)
     return _validated_answer(retry_raw, prepared)

@@ -41,12 +41,21 @@ _QUESTION_STOP_WORDS = frozenset(
         "appears",
         "are",
         "can",
+        "common",
+        "commonly",
         "data",
+        "did",
         "do",
         "does",
         "export",
+        "find",
+        "found",
+        "for",
+        "frequent",
+        "frequently",
         "from",
         "give",
+        "happened",
         "have",
         "i",
         "in",
@@ -54,15 +63,19 @@ _QUESTION_STOP_WORDS = frozenset(
         "is",
         "know",
         "me",
+        "mean",
+        "might",
+        "most",
         "my",
         "of",
+        "often",
         "on",
         "overview",
         "please",
+        "present",
         "record",
         "records",
         "related",
-        "searches",
         "show",
         "tell",
         "the",
@@ -79,6 +92,17 @@ _QUESTION_STOP_WORDS = frozenset(
         "with",
     }
 )
+_QUESTION_TOKEN_ALIASES = {
+    "device": "centaurfacetdevice",
+    "devices": "centaurfacetdevice",
+    "hostname": "centaurfacethostname",
+    "hostnames": "centaurfacethostname",
+    "searched": "search",
+    "searches": "search",
+    "searching": "search",
+    "service": "centaurfacetservice",
+    "services": "centaurfacetservice",
+}
 _TOP_VALUE_QUERIES = {
     "service": (
         """
@@ -175,7 +199,7 @@ class QuestionContext:
 
 def _fts_query(question: str, *, require_all: bool = False) -> str | None:
     tokens = [
-        token
+        _QUESTION_TOKEN_ALIASES.get(token, token)
         for token in _FTS_TOKEN_RE.findall(question.lower())
         if token not in _QUESTION_STOP_WORDS
     ][:20]
@@ -279,7 +303,19 @@ class AnalysisSession:
             )
             return False
 
-        attributes = " ".join(str(value) for value in record.attributes.values())
+        fts_values = [
+            *(str(value) for value in record.attributes.values()),
+            record.platform,
+            record.category,
+            record.activity_type,
+        ]
+        if record.device:
+            fts_values.extend((record.device, "centaurfacetdevice"))
+        if record.hostname:
+            fts_values.append("centaurfacethostname")
+        if record.service:
+            fts_values.append("centaurfacetservice")
+        attributes = " ".join(fts_values)
         self._connection.execute(
             """
             INSERT INTO records(
@@ -659,7 +695,7 @@ class AnalysisSession:
                 ),
             ]
             facts.extend(archive_facts[1:])
-        else:
+        elif matching_records:
             matching_facts = self._scope_facts(
                 scope="matching",
                 query=aggregate_query,
@@ -668,11 +704,29 @@ class AnalysisSession:
             facts = [archive_facts[0], matching_facts[0]]
             facts.extend(matching_facts[1:])
             facts.extend(archive_facts[1:])
+        else:
+            facts = [
+                _fact(
+                    scope="matching",
+                    scope_definition=(
+                        f"full_text_query_sha256:"
+                        f"{sha256(aggregate_query.encode('utf-8')).hexdigest()}"
+                    ),
+                    metric="record_count",
+                    value=0,
+                )
+            ]
         candidates = self._candidate_records(aggregate_query, limit=candidate_limit)
         return QuestionContext(
             total_records=total_records,
             matching_records=matching_records,
-            selection_mode="archive" if aggregate_query is None else "full_text_all_terms",
+            selection_mode=(
+                "archive"
+                if aggregate_query is None
+                else "full_text_all_terms"
+                if matching_records
+                else "no_match"
+            ),
             facts=tuple(facts),
             records=self._diversify(candidates, limit=evidence_limit),
         )

@@ -29,16 +29,35 @@ class FakeAdapter:
         self.response = response
         self.calls = 0
         self.answer_schema: dict[str, object] | None = None
+        self.request_body: bytes | None = None
 
-    def complete(
+    def build_request_body(
         self,
         *,
         system: str,
         user: str,
         answer_schema: dict[str, object] | None = None,
-    ) -> str:
-        self.calls += 1
+    ) -> bytes:
         self.answer_schema = answer_schema
+        return json.dumps(
+            {
+                "model": self.model,
+                "system": system,
+                "user": user,
+                "schema": answer_schema,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+
+    def complete(self, *, request_body: bytes) -> str:
+        self.calls += 1
+        self.request_body = request_body
+        request = json.loads(request_body)
+        system = request["system"]
+        user = request["user"]
+        assert isinstance(system, str)
+        assert isinstance(user, str)
         assert "untrusted data" in system
         assert "record_ids" in system
         assert "fact_ids" in system
@@ -70,6 +89,16 @@ def assert_answer_schema(schema: object) -> None:
     assert fact_ids["items"] == {"type": "string"}
     assert item["required"] == ["text", "kind", "record_ids", "fact_ids"]
     assert item["additionalProperties"] is False
+
+
+def complete_directly(
+    adapter: OllamaAdapter | OpenAIAdapter | AnthropicAdapter | GeminiAdapter,
+    *,
+    system: str = "s",
+    user: str = "u",
+) -> str:
+    request_body = adapter.build_request_body(system=system, user=user)
+    return adapter.complete(request_body=request_body)
 
 
 def test_cloud_requires_explicit_confirmation(google_export: Path) -> None:
@@ -118,12 +147,23 @@ def test_context_is_bounded_and_preview_is_explicit(google_export: Path) -> None
     payload = prepared.payload
     assert isinstance(preview, TransmissionPreview)
     assert preview.payload_bytes <= 256 * 1024
-    assert preview.payload_bytes == len(payload.encode())
+    assert preview.payload_bytes == len(prepared.request_body)
+    assert preview.payload_bytes > len(payload.encode())
+    request = json.loads(prepared.request_body)
+    assert request["user"] == payload
+    assert "untrusted data" in request["system"]
+    assert_answer_schema(request["schema"])
+    rendered_schema = json.dumps(request["schema"])
+    assert all(fact_id not in rendered_schema for fact_id in prepared.valid_fact_ids)
+    assert all(record_id not in rendered_schema for record_id in prepared.valid_record_ids)
     assert preview.destination == "https://provider.invalid"
     assert preview.total_records == 5
     assert preview.matching_records == 1
     assert preview.fact_count >= 2
     assert preview.data_mode == "cloud_raw_personal_data"
+    assert preview.will_transmit
+    assert "request.system_prompt" in preview.transmitted_fields
+    assert "request.structured_output_schema" in preview.transmitted_fields
     assert "privacy tools" in payload
     decoded = json.loads(payload)
     assert decoded["scope"]["total_records"] == 5
@@ -135,6 +175,48 @@ def test_context_is_bounded_and_preview_is_explicit(google_export: Path) -> None
     assert "archive_id" not in payload
     assert "internal_path" not in payload
     assert "Takeout/" not in payload
+
+
+def test_authorized_submission_uses_exact_prepared_request_body(
+    google_export: Path,
+) -> None:
+    adapter = FakeAdapter({"claims": []})
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        prepared = prepare_question(session, "privacy", adapter)
+        fact_id = next(iter(prepared.valid_fact_ids))
+        adapter.response = {
+            "claims": [
+                {
+                    "text": "A local calculation was provided.",
+                    "kind": "calculated",
+                    "record_ids": [],
+                    "fact_ids": [fact_id],
+                }
+            ]
+        }
+        answer_question(prepared, adapter=adapter, allow_cloud=True)
+
+    assert adapter.request_body is prepared.request_body
+
+
+def test_anthropic_preview_includes_static_schema_and_complete_request_body(
+    google_export: Path,
+) -> None:
+    adapter = AnthropicAdapter("synthetic")
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        prepared = prepare_question(session, "privacy", adapter)
+
+    request = json.loads(prepared.request_body)
+    assert request["system"]
+    assert request["messages"][0]["content"] == prepared.payload
+    schema = request["output_config"]["format"]["schema"]
+    rendered_schema = json.dumps(schema)
+    assert all(fact_id not in rendered_schema for fact_id in prepared.valid_fact_ids)
+    assert all(record_id not in rendered_schema for record_id in prepared.valid_record_ids)
+    assert prepared.preview.payload_bytes == len(prepared.request_body)
+    assert prepared.preview.payload_bytes > len(prepared.payload.encode())
 
 
 def test_complete_payload_rejects_oversized_question(google_export: Path) -> None:
@@ -227,19 +309,9 @@ def test_local_model_retries_one_invalid_citation_contract(google_export: Path) 
             super().__init__({"claims": []})
             self.responses: list[dict[str, object]] = []
 
-        def complete(
-            self,
-            *,
-            system: str,
-            user: str,
-            answer_schema: dict[str, object] | None = None,
-        ) -> str:
+        def complete(self, *, request_body: bytes) -> str:
             self.response = self.responses[self.calls]
-            return super().complete(
-                system=system,
-                user=user,
-                answer_schema=answer_schema,
-            )
+            return super().complete(request_body=request_body)
 
     adapter = LocalSequenceAdapter()
     with AnalysisSession() as session:
@@ -283,6 +355,11 @@ def test_local_model_retries_one_invalid_citation_contract(google_export: Path) 
     kind = claim_properties["kind"]
     assert isinstance(kind, dict)
     assert kind["enum"] == ["inference"]
+    record_ids = claim_properties["record_ids"]
+    assert isinstance(record_ids, dict)
+    record_items = record_ids["items"]
+    assert isinstance(record_items, dict)
+    assert set(record_items["enum"]) == prepared.valid_record_ids
 
 
 def test_calculated_claim_accepts_valid_fact_evidence(google_export: Path) -> None:
@@ -315,7 +392,7 @@ def test_calculated_claim_accepts_valid_fact_evidence(google_export: Path) -> No
     assert isinstance(fact_ids, dict)
     fact_items = fact_ids["items"]
     assert isinstance(fact_items, dict)
-    assert set(fact_items["enum"]) == prepared.valid_fact_ids
+    assert fact_items == {"type": "string"}
 
 
 def test_rejects_fabricated_fact_citation(google_export: Path) -> None:
@@ -337,7 +414,9 @@ def test_rejects_fabricated_fact_citation(google_export: Path) -> None:
             answer_question(prepared, adapter=adapter, allow_cloud=True)
 
 
-def test_no_match_question_still_has_archive_facts(google_export: Path) -> None:
+def test_no_match_question_is_answered_locally_without_archive_facts(
+    google_export: Path,
+) -> None:
     adapter = FakeAdapter({"claims": []})
     with AnalysisSession() as session:
         analyze_sources(session, [SourceSpec("google", google_export)])
@@ -345,36 +424,19 @@ def test_no_match_question_still_has_archive_facts(google_export: Path) -> None:
     decoded = json.loads(prepared.payload)
     assert prepared.preview.matching_records == 0
     assert prepared.preview.record_count == 0
-    assert {"derived", "browsing", "device"} <= set(prepared.preview.sensitivity_classes)
+    assert prepared.preview.fact_count == 0
+    assert prepared.preview.payload_bytes == 0
+    assert not prepared.preview.will_transmit
+    assert prepared.preview.data_mode == "local_no_match"
+    assert prepared.preview.sensitivity_classes == ()
+    assert prepared.request_body == b""
     assert decoded["evidence_records"] == []
-    assert any(
-        fact["scope"] == "matching" and fact["metric"] == "record_count" and fact["value"] == 0
-        for fact in decoded["calculated_facts"]
-    )
-    fact_id = next(iter(prepared.valid_fact_ids))
-    adapter.response = {
-        "claims": [
-            {
-                "text": "No exact records matched.",
-                "kind": "calculated",
-                "record_ids": [],
-                "fact_ids": [fact_id],
-            }
-        ]
-    }
-    answer_question(prepared, adapter=adapter, allow_cloud=True)
-    assert adapter.answer_schema is not None
-    properties = adapter.answer_schema["properties"]
-    assert isinstance(properties, dict)
-    claims = properties["claims"]
-    assert isinstance(claims, dict)
-    item = claims["items"]
-    assert isinstance(item, dict)
-    claim_properties = item["properties"]
-    assert isinstance(claim_properties, dict)
-    record_ids = claim_properties["record_ids"]
-    assert isinstance(record_ids, dict)
-    assert record_ids["maxItems"] == 0
+    assert len(decoded["calculated_facts"]) == 1
+    assert decoded["calculated_facts"][0]["scope"] == "matching"
+    assert decoded["calculated_facts"][0]["value"] == 0
+    answer = answer_question(prepared, adapter=adapter, allow_cloud=False)
+    assert answer.claims[0].text == "No matching records were found for this question."
+    assert adapter.calls == 0
 
 
 def test_observed_claim_requires_evidence(google_export: Path) -> None:
@@ -442,7 +504,7 @@ def test_provider_response_parsers(monkeypatch: pytest.MonkeyPatch) -> None:
         "_post_json",
         lambda *args, **kwargs: {"message": {"content": '{"answer":"ok","claims":[]}'}},
     )
-    assert '"answer"' in ollama.complete(system="s", user="u")
+    assert '"answer"' in complete_directly(ollama)
 
     openai = OpenAIAdapter("synthetic")
     monkeypatch.setattr(
@@ -452,7 +514,7 @@ def test_provider_response_parsers(monkeypatch: pytest.MonkeyPatch) -> None:
             "choices": [{"message": {"content": '{"answer":"ok","claims":[]}'}}]
         },
     )
-    assert '"answer"' in openai.complete(system="s", user="u")
+    assert '"answer"' in complete_directly(openai)
 
     anthropic = AnthropicAdapter("synthetic")
     monkeypatch.setattr(
@@ -460,7 +522,7 @@ def test_provider_response_parsers(monkeypatch: pytest.MonkeyPatch) -> None:
         "_post_json",
         lambda *args, **kwargs: {"content": [{"text": '{"answer":"ok","claims":[]}'}]},
     )
-    assert '"answer"' in anthropic.complete(system="s", user="u")
+    assert '"answer"' in complete_directly(anthropic)
 
     gemini = GeminiAdapter("synthetic")
     monkeypatch.setattr(
@@ -470,7 +532,7 @@ def test_provider_response_parsers(monkeypatch: pytest.MonkeyPatch) -> None:
             "candidates": [{"content": {"parts": [{"text": '{"answer":"ok","claims":[]}'}]}}]
         },
     )
-    assert '"answer"' in gemini.complete(system="s", user="u")
+    assert '"answer"' in complete_directly(gemini)
 
 
 def test_ollama_requests_structured_output(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -478,7 +540,7 @@ def test_ollama_requests_structured_output(monkeypatch: pytest.MonkeyPatch) -> N
     ollama = OllamaAdapter()
 
     def respond(*args, **kwargs):
-        captured["payload"] = kwargs["payload"]
+        captured["payload"] = json.loads(kwargs["content"])
         return {
             "done_reason": "stop",
             "message": {"content": '{"claims":[]}'},
@@ -486,7 +548,7 @@ def test_ollama_requests_structured_output(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(ollama, "_post_json", respond)
 
-    assert ollama.complete(system="s", user="u") == '{"claims":[]}'
+    assert complete_directly(ollama) == '{"claims":[]}'
     payload = captured["payload"]
     assert isinstance(payload, dict)
     assert_answer_schema(payload["format"])
@@ -500,7 +562,7 @@ def test_openai_requests_strict_structured_output(
     openai = OpenAIAdapter("synthetic")
 
     def respond(*args, **kwargs):
-        captured["payload"] = kwargs["payload"]
+        captured["payload"] = json.loads(kwargs["content"])
         return {
             "choices": [
                 {
@@ -512,7 +574,7 @@ def test_openai_requests_strict_structured_output(
 
     monkeypatch.setattr(openai, "_post_json", respond)
 
-    assert openai.complete(system="s", user="u") == '{"claims":[]}'
+    assert complete_directly(openai) == '{"claims":[]}'
     payload = captured["payload"]
     assert isinstance(payload, dict)
     response_format = payload["response_format"]
@@ -532,7 +594,7 @@ def test_anthropic_requests_and_reads_structured_output(
     anthropic = AnthropicAdapter("synthetic")
 
     def respond(*args, **kwargs):
-        captured["payload"] = kwargs["payload"]
+        captured["payload"] = json.loads(kwargs["content"])
         return {
             "stop_reason": "end_turn",
             "content": [
@@ -544,7 +606,7 @@ def test_anthropic_requests_and_reads_structured_output(
 
     monkeypatch.setattr(anthropic, "_post_json", respond)
 
-    assert anthropic.complete(system="s", user="u") == '{"claims":[]}'
+    assert complete_directly(anthropic) == '{"claims":[]}'
     payload = captured["payload"]
     assert isinstance(payload, dict)
     output_config = payload["output_config"]
@@ -562,7 +624,7 @@ def test_gemini_requests_and_reads_structured_output(
     gemini = GeminiAdapter("synthetic")
 
     def respond(*args, **kwargs):
-        captured["payload"] = kwargs["payload"]
+        captured["payload"] = json.loads(kwargs["content"])
         return {
             "candidates": [
                 {
@@ -580,7 +642,7 @@ def test_gemini_requests_and_reads_structured_output(
 
     monkeypatch.setattr(gemini, "_post_json", respond)
 
-    assert gemini.complete(system="s", user="u") == '{"claims":[]}'
+    assert complete_directly(gemini) == '{"claims":[]}'
     payload = captured["payload"]
     assert isinstance(payload, dict)
     generation_config = payload["generationConfig"]
@@ -612,7 +674,7 @@ def test_anthropic_reports_incomplete_structured_output(
     )
 
     with pytest.raises(ModelAdapterError, match=message):
-        anthropic.complete(system="s", user="u")
+        complete_directly(anthropic)
 
 
 def test_ollama_reports_incomplete_structured_output(
@@ -629,7 +691,7 @@ def test_ollama_reports_incomplete_structured_output(
     )
 
     with pytest.raises(ModelAdapterError, match="output limit"):
-        ollama.complete(system="s", user="u")
+        complete_directly(ollama)
 
 
 @pytest.mark.parametrize(
@@ -668,7 +730,7 @@ def test_openai_reports_incomplete_structured_output(
     monkeypatch.setattr(openai, "_post_json", lambda *args, **kwargs: response)
 
     with pytest.raises(ModelAdapterError, match=message):
-        openai.complete(system="s", user="u")
+        complete_directly(openai)
 
 
 @pytest.mark.parametrize(
@@ -698,7 +760,7 @@ def test_gemini_reports_incomplete_structured_output(
     )
 
     with pytest.raises(ModelAdapterError, match=message):
-        gemini.complete(system="s", user="u")
+        complete_directly(gemini)
 
 
 def test_gemini_reports_prompt_level_safety_block(
@@ -714,7 +776,7 @@ def test_gemini_reports_prompt_level_safety_block(
     )
 
     with pytest.raises(ModelAdapterError, match="declined"):
-        gemini.complete(system="s", user="u")
+        complete_directly(gemini)
 
 
 def test_adapter_factory_uses_environment(

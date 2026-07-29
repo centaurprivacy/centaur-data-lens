@@ -30,10 +30,13 @@ local query scope. It selects a bounded evidence set diversified across
 platform, category, time, and repeated value groups. Calculated facts and
 records have separate citation namespaces.
 
-`ModelAdapter` exposes destination and locality metadata plus one completion
-operation. A prepared question freezes the exact payload, preview, and valid
-fact/record IDs before authorization. Adapters receive no source paths, archive
-identifiers, internal filenames, or tools.
+`ModelAdapter` exposes destination and locality metadata, deterministic
+request-body construction, and one completion operation. A prepared question
+freezes the exact provider request-body bytes, preview, and valid fact/record IDs
+before authorization. Cloud schemas are static; citation IDs stay in message
+content and are validated locally. No-match questions return a deterministic
+local answer and never invoke an adapter. Adapters receive no source paths,
+archive identifiers, internal filenames, or tools.
 
 ## Ephemeral state
 
