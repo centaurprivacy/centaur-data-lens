@@ -5,18 +5,25 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from centaur_data_lens.ai import prepare_question
 from centaur_data_lens.analysis import AnalysisSession, SourceSpec, analyze_sources
 from centaur_data_lens.models import (
+    ArchiveManifest,
     ManifestEntry,
+    ManifestGroup,
     NormalizedRecord,
     QueryFacet,
     QueryIntent,
     QueryOperation,
+    QueryPlan,
+    QueryScope,
     QueryStatus,
     SourceReference,
 )
-from centaur_data_lens.query import compile_query
+from centaur_data_lens.query import compile_query, execute_query
 
 
 class LocalEnvelopeAdapter:
@@ -173,7 +180,7 @@ def test_complete_manifest_and_aggregates_are_archive_wide(tmp_path: Path) -> No
     assert overview.matching_records == 1
     assert any(fact.metric == "archive_entry_count" for fact in overview.facts)
     assert any(fact.metric == "parser_unsupported_entry_count" for fact in overview.facts)
-    assert any(not fact.transmittable and "product" in fact.dimensions for fact in overview.facts)
+    assert all("product" not in fact.dimensions for fact in overview.facts)
     assert "synthetic_private_marker" not in prepared.payload.lower()
 
 
@@ -221,6 +228,137 @@ def test_compiler_covers_all_allowlisted_plan_families() -> None:
     )
     invalid_date = compile_query("what happened on July 99, 2026?")
     assert invalid_date.intent == QueryIntent.CLARIFICATION
+
+
+@pytest.mark.parametrize(
+    ("intent", "operation", "scope", "message"),
+    [
+        (
+            QueryIntent.DATE_LOOKUP,
+            QueryOperation.DATE_RANGE,
+            QueryScope(),
+            "require both",
+        ),
+        (
+            QueryIntent.DATE_LOOKUP,
+            QueryOperation.DATE_RANGE,
+            QueryScope(
+                start_utc=datetime(2026, 7, 21, tzinfo=UTC),
+                end_utc=datetime(2026, 7, 20, tzinfo=UTC),
+            ),
+            "earlier",
+        ),
+        (
+            QueryIntent.DATE_LOOKUP,
+            QueryOperation.DATE_RANGE,
+            QueryScope(
+                start_utc=datetime(2026, 7, 20),
+                end_utc=datetime(2026, 7, 21),
+            ),
+            "timezone-aware",
+        ),
+        (
+            QueryIntent.FACET,
+            QueryOperation.FACET_COUNTS,
+            QueryScope(),
+            "require a facet",
+        ),
+        (
+            QueryIntent.COMPARISON,
+            QueryOperation.PLATFORM_COMPARISON,
+            QueryScope(platforms=("google",)),
+            "at least two platforms",
+        ),
+        (
+            QueryIntent.COMPARISON,
+            QueryOperation.CATEGORY_COMPARISON,
+            QueryScope(categories=("search_history",)),
+            "at least two categories",
+        ),
+        (
+            QueryIntent.FULL_TEXT,
+            QueryOperation.FULL_TEXT_MATCH,
+            QueryScope(),
+            "at least one text term",
+        ),
+        (
+            QueryIntent.RECORD_DETAIL,
+            QueryOperation.RECORD_BY_ID,
+            QueryScope(),
+            "at least one record ID",
+        ),
+        (
+            QueryIntent.ARCHIVE_OVERVIEW,
+            QueryOperation.ARCHIVE_OVERVIEW,
+            QueryScope(text_terms=("ignored",)),
+            "does not accept scope fields",
+        ),
+        (
+            QueryIntent.FACET,
+            QueryOperation.ARCHIVE_OVERVIEW,
+            QueryScope(),
+            "incompatible with intent",
+        ),
+    ],
+)
+def test_public_query_plan_rejects_invalid_operation_scope_combinations(
+    intent: QueryIntent,
+    operation: QueryOperation,
+    scope: QueryScope,
+    message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        QueryPlan(
+            plan_id="plan-synthetic",
+            question="Synthetic question",
+            intent=intent,
+            operation=operation,
+            scope=scope,
+        )
+
+
+def test_execute_query_revalidates_copied_plans_before_sqlite() -> None:
+    valid = compile_query("find records about privacy")
+    invalid = valid.model_copy(update={"scope": QueryScope()})
+
+    with (
+        AnalysisSession() as session,
+        pytest.raises(
+            ValidationError,
+            match="at least one text term",
+        ),
+    ):
+        session.execute_query(invalid)
+
+
+def test_overview_facts_do_not_scale_with_untrusted_product_cardinality() -> None:
+    product_count = 50_000
+    manifest = ArchiveManifest(
+        products=tuple(
+            ManifestGroup(
+                name=f"synthetic-product-{index}",
+                entry_count=1,
+                compressed_size=1,
+                uncompressed_size=1,
+                parser_supported_entries=0,
+            )
+            for index in range(product_count)
+        ),
+        entry_count=product_count,
+        compressed_size=product_count,
+        uncompressed_size=product_count,
+        parser_unsupported_entries=product_count,
+    )
+
+    with AnalysisSession() as session:
+        explicit_manifest_result = execute_query(
+            session._connection,
+            manifest,
+            compile_query("summarize this export"),
+        )
+
+    assert len(explicit_manifest_result.facts) == 6
+    assert all("product" not in fact.dimensions for fact in explicit_manifest_result.facts)
 
 
 def test_query_execution_uses_complete_population_with_bounded_evidence() -> None:

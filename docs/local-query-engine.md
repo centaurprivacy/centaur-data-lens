@@ -14,11 +14,12 @@ uncompressed sizes, nested-archive status, and parser coverage.
 The manifest also aggregates products, formats, sizes, nested archives, and
 parser-supported versus unsupported entry counts. Entry `source_id` and
 `internal_path` fields are provenance only. They are never serialized by model
-preparation. Product labels are path-derived, so product-level facts are also
-marked local-only; safe aggregate counts, sizes, extensions, and parser coverage
-may be included downstream. Extensions enter downstream facts only when they
-match a short fixed allowlist; every other filename suffix is aggregated as
-`[other]`.
+preparation. Product labels are path-derived, so product aggregates are confined
+to the local manifest and are not materialized as `CalculatedFact` values.
+This prevents untrusted product cardinality from expanding overview results.
+Safe aggregate counts, sizes, extensions, and parser coverage may be included
+downstream. Extensions enter downstream facts only when they match a short fixed
+allowlist; every other filename suffix is aggregated as `[other]`.
 
 ## Planning
 
@@ -30,7 +31,7 @@ stable ID, one `QueryIntent`, one allowlisted `QueryOperation`, a typed
 - UTC date range derived from an explicit local timezone
 - service, device, hostname, and activity-type facets
 - monthly UTC trend buckets
-- platform comparison
+- platform and category comparison
 - parameterized FTS lookup
 - record detail for explicit result IDs
 - coverage-only clarification or unsupported-form results
@@ -38,6 +39,13 @@ stable ID, one `QueryIntent`, one allowlisted `QueryOperation`, a typed
 The compiler uses local parsing only. It cannot emit SQL or code. Full-text terms
 and record IDs become SQLite parameters; identifiers and SQL templates are
 selected exclusively from local enums.
+
+`QueryPlan` validates its intent/operation pairing and operation-specific scope
+at construction time. Required date bounds, facets, comparison members, text
+terms, and record IDs cannot be omitted, and scope fields that an operation
+would ignore are rejected. Invalid public plans therefore fail with structured
+Pydantic validation. `execute_query()` revalidates its plan at the boundary
+before touching SQLite as defense in depth.
 
 The compiler chooses one primary operation by deterministic precedence. It does
 not compose mixed scopes. For example, a device-facet question with additional

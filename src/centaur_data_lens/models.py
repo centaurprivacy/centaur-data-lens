@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ClaimKind(StrEnum):
@@ -177,6 +177,73 @@ class QueryPlan(BaseModel):
     scope: QueryScope = Field(default_factory=QueryScope)
     assumptions: tuple[QueryAssumption, ...] = ()
     clarification: str | None = None
+
+    @model_validator(mode="after")
+    def validate_operation_scope(self) -> Self:
+        expected_operations = {
+            QueryIntent.ARCHIVE_OVERVIEW: frozenset({QueryOperation.ARCHIVE_OVERVIEW}),
+            QueryIntent.DATE_LOOKUP: frozenset({QueryOperation.DATE_RANGE}),
+            QueryIntent.FACET: frozenset({QueryOperation.FACET_COUNTS}),
+            QueryIntent.TREND: frozenset({QueryOperation.TIME_BUCKETS}),
+            QueryIntent.COMPARISON: frozenset(
+                {
+                    QueryOperation.PLATFORM_COMPARISON,
+                    QueryOperation.CATEGORY_COMPARISON,
+                }
+            ),
+            QueryIntent.FULL_TEXT: frozenset({QueryOperation.FULL_TEXT_MATCH}),
+            QueryIntent.RECORD_DETAIL: frozenset({QueryOperation.RECORD_BY_ID}),
+            QueryIntent.CLARIFICATION: frozenset({QueryOperation.COVERAGE_ONLY}),
+            QueryIntent.UNSUPPORTED: frozenset({QueryOperation.COVERAGE_ONLY}),
+        }
+        if self.operation not in expected_operations[self.intent]:
+            raise ValueError(
+                f"Operation {self.operation.value} is incompatible with intent {self.intent.value}."
+            )
+
+        allowed_scope_fields = {
+            QueryOperation.ARCHIVE_OVERVIEW: frozenset(),
+            QueryOperation.DATE_RANGE: frozenset({"start_utc", "end_utc", "timezone"}),
+            QueryOperation.FACET_COUNTS: frozenset({"categories", "facet"}),
+            QueryOperation.TIME_BUCKETS: frozenset(),
+            QueryOperation.PLATFORM_COMPARISON: frozenset({"platforms"}),
+            QueryOperation.CATEGORY_COMPARISON: frozenset({"categories"}),
+            QueryOperation.FULL_TEXT_MATCH: frozenset({"text_terms"}),
+            QueryOperation.RECORD_BY_ID: frozenset({"record_ids"}),
+            QueryOperation.COVERAGE_ONLY: frozenset(),
+        }
+        populated_scope_fields = {
+            field_name for field_name, value in self.scope if value is not None and value != ()
+        }
+        unexpected = populated_scope_fields - allowed_scope_fields[self.operation]
+        if unexpected:
+            rendered = ", ".join(sorted(unexpected))
+            raise ValueError(
+                f"Operation {self.operation.value} does not accept scope fields: {rendered}."
+            )
+
+        if self.operation == QueryOperation.DATE_RANGE:
+            start = self.scope.start_utc
+            end = self.scope.end_utc
+            if start is None or end is None:
+                raise ValueError("Date-range plans require both start_utc and end_utc.")
+            if start.utcoffset() is None or end.utcoffset() is None:
+                raise ValueError("Date-range bounds must be timezone-aware.")
+            if start >= end:
+                raise ValueError("Date-range start_utc must be earlier than end_utc.")
+        elif self.operation == QueryOperation.FACET_COUNTS and self.scope.facet is None:
+            raise ValueError("Facet-count plans require a facet.")
+        elif self.operation == QueryOperation.PLATFORM_COMPARISON and len(self.scope.platforms) < 2:
+            raise ValueError("Platform-comparison plans require at least two platforms.")
+        elif (
+            self.operation == QueryOperation.CATEGORY_COMPARISON and len(self.scope.categories) < 2
+        ):
+            raise ValueError("Category-comparison plans require at least two categories.")
+        elif self.operation == QueryOperation.FULL_TEXT_MATCH and not self.scope.text_terms:
+            raise ValueError("Full-text plans require at least one text term.")
+        elif self.operation == QueryOperation.RECORD_BY_ID and not self.scope.record_ids:
+            raise ValueError("Record-detail plans require at least one record ID.")
+        return self
 
 
 class ManifestEntry(BaseModel):

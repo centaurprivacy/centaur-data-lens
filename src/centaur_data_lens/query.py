@@ -586,33 +586,29 @@ def _manifest_facts(plan: QueryPlan, manifest: ArchiveManifest) -> list[Calculat
             provenance=provenance,
         ),
     ]
-    for group_type, groups in (("product", manifest.products), ("format", manifest.formats)):
-        for group in groups:
-            transmittable = group_type != "product"
-            facts.append(
-                _fact(
-                    plan=plan,
-                    scope="archive",
-                    scope_definition="all_safe_archive_entries",
-                    metric="archive_entry_count",
-                    value=group.entry_count,
-                    dimensions={group_type: group.name},
-                    provenance=provenance,
-                    transmittable=transmittable,
-                )
+    for group in manifest.formats:
+        facts.append(
+            _fact(
+                plan=plan,
+                scope="archive",
+                scope_definition="all_safe_archive_entries",
+                metric="archive_entry_count",
+                value=group.entry_count,
+                dimensions={"format": group.name},
+                provenance=provenance,
             )
-            facts.append(
-                _fact(
-                    plan=plan,
-                    scope="archive",
-                    scope_definition="all_safe_archive_entries",
-                    metric="archive_uncompressed_bytes",
-                    value=group.uncompressed_size,
-                    dimensions={group_type: group.name},
-                    provenance=provenance,
-                    transmittable=transmittable,
-                )
+        )
+        facts.append(
+            _fact(
+                plan=plan,
+                scope="archive",
+                scope_definition="all_safe_archive_entries",
+                metric="archive_uncompressed_bytes",
+                value=group.uncompressed_size,
+                dimensions={"format": group.name},
+                provenance=provenance,
             )
+        )
     return facts
 
 
@@ -818,6 +814,7 @@ def execute_query(
 ) -> QueryResult:
     """Execute one allowlisted plan with parameters; no plan can supply SQL."""
 
+    plan = QueryPlan.model_validate(plan.model_dump(mode="python"))
     total = int(connection.execute("SELECT COUNT(*) FROM records").fetchone()[0])
     if plan.operation == QueryOperation.COVERAGE_ONLY:
         status = (
