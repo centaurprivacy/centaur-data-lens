@@ -41,6 +41,9 @@ _RECORD_ID_RE = re.compile(r"\b[0-9a-f]{24}\b", re.IGNORECASE)
 _MAX_TEXT_TERMS = 20
 _MAX_RECORD_IDS = 100
 _GENERIC_PRODUCTS = frozenset({"takeout", "your_facebook_activity"})
+_TRANSMITTABLE_EXTENSIONS = frozenset(
+    {".csv", ".html", ".jpeg", ".jpg", ".json", ".mp4", ".png", ".txt", ".xml", ".zip"}
+)
 _TEXT_STOP_WORDS = frozenset(
     {
         "a",
@@ -138,6 +141,15 @@ def _slug(value: str) -> str:
     return rendered[:80] or "other"
 
 
+def _safe_extension(value: str) -> str:
+    normalized = value.lower()
+    if normalized in _TRANSMITTABLE_EXTENSIONS:
+        return normalized
+    if not normalized or normalized == "[no extension]":
+        return "[no extension]"
+    return "[other]"
+
+
 def _product_for(entry: ArchiveEntry, platform: str, parser: PlatformParser) -> str:
     if parser.supported_path(entry.path):
         return parser.category_for(entry.path)
@@ -169,13 +181,14 @@ def manifest_entries(
             and parser.supported_path(entry.path)
         )
         suffix = PurePosixPath(entry.path).suffix.lower()
+        extension = _safe_extension(suffix)
         inventoried.append(
             ManifestEntry(
                 source_id=entry.source_id,
                 platform=platform,
                 internal_path=entry.path,
                 product=_product_for(entry, platform, parser),
-                extension=suffix if suffix else "[no extension]",
+                extension=extension,
                 compressed_size=entry.compressed_size,
                 uncompressed_size=entry.size,
                 nested_archive=entry.nested_archive,
@@ -195,7 +208,10 @@ def _groups(
 ) -> tuple[ManifestGroup, ...]:
     grouped: dict[str, list[ManifestEntry]] = {}
     for entry in entries:
-        grouped.setdefault(getattr(entry, field), []).append(entry)
+        name = getattr(entry, field)
+        if field == "extension":
+            name = _safe_extension(name)
+        grouped.setdefault(name, []).append(entry)
     return tuple(
         ManifestGroup(
             name=name,
@@ -706,6 +722,63 @@ def _platform_coverage(
     return status, tuple(notes)
 
 
+def _category_coverage(
+    manifest: ArchiveManifest,
+    category: str,
+) -> tuple[QueryStatus, CoverageNote]:
+    entries = tuple(entry for entry in manifest.entries if entry.product == category)
+    if not entries:
+        message = (
+            "No supported search-history records were found in this export."
+            if category == "search_history"
+            else f"The {category} category is not present in the selected sources."
+        )
+        return (
+            QueryStatus.NOT_PRESENT,
+            CoverageNote(
+                code="category_not_present",
+                message=message,
+                category=category,
+            ),
+        )
+    if not any(entry.parser_supported for entry in entries):
+        return (
+            QueryStatus.PRODUCT_UNSUPPORTED,
+            CoverageNote(
+                code="product_present_but_unsupported",
+                message=(
+                    f"The {category} product is present, but Centaur has no supported parser "
+                    "data for it."
+                ),
+                category=category,
+                product=category,
+            ),
+        )
+    message = (
+        "No supported search-history records were found in this export."
+        if category == "search_history"
+        else f"The {category} category is present but contains no matching data."
+    )
+    return (
+        QueryStatus.MATCHING_DATA_ABSENT,
+        CoverageNote(
+            code="category_data_absent",
+            message=message,
+            category=category,
+        ),
+    )
+
+
+def _stronger_coverage_status(current: QueryStatus, candidate: QueryStatus) -> QueryStatus:
+    priority = {
+        QueryStatus.OK: 0,
+        QueryStatus.MATCHING_DATA_ABSENT: 1,
+        QueryStatus.PRODUCT_UNSUPPORTED: 2,
+        QueryStatus.NOT_PRESENT: 3,
+    }
+    return candidate if priority[candidate] > priority[current] else current
+
+
 def _fts_expression(terms: Sequence[str]) -> str:
     return " AND ".join(f'"{term.replace(chr(34), "")}"' for term in terms)
 
@@ -947,30 +1020,7 @@ def execute_query(
             ]
             if missing:
                 category = missing[0]
-                manifest_products = {entry.product for entry in manifest.entries}
-                status = (
-                    QueryStatus.MATCHING_DATA_ABSENT
-                    if category in manifest_products
-                    else QueryStatus.NOT_PRESENT
-                )
-                message = (
-                    "No supported search-history records were found in this export."
-                    if category == "search_history"
-                    else (
-                        f"The {category} category is present but contains no matching data."
-                        if status == QueryStatus.MATCHING_DATA_ABSENT
-                        else f"The {category} category is not present in the selected sources."
-                    )
-                )
-                note = CoverageNote(
-                    code=(
-                        "category_data_absent"
-                        if status == QueryStatus.MATCHING_DATA_ABSENT
-                        else "category_not_present"
-                    ),
-                    message=message,
-                    category=category,
-                )
+                status, note = _category_coverage(manifest, category)
                 return _result(
                     plan=plan,
                     status=status,
@@ -1147,31 +1197,14 @@ def execute_query(
             str(row[0])
             for row in connection.execute("SELECT DISTINCT category FROM records").fetchall()
         }
-        manifest_products = {entry.product for entry in manifest.entries}
         notes = []
         status = QueryStatus.OK
         for category in plan.scope.categories:
             if category in available:
                 continue
-            if category in manifest_products:
-                if status == QueryStatus.OK:
-                    status = QueryStatus.MATCHING_DATA_ABSENT
-                notes.append(
-                    CoverageNote(
-                        code="category_data_absent",
-                        message=f"The {category} category is present but contains no records.",
-                        category=category,
-                    )
-                )
-            else:
-                status = QueryStatus.NOT_PRESENT
-                notes.append(
-                    CoverageNote(
-                        code="category_not_present",
-                        message=f"The {category} category is not present in the selected sources.",
-                        category=category,
-                    )
-                )
+            category_status, note = _category_coverage(manifest, category)
+            status = _stronger_coverage_status(status, category_status)
+            notes.append(note)
         facts = [
             _fact(
                 plan=plan,

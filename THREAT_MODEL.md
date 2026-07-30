@@ -42,6 +42,12 @@ model context. Cloud consent is a disclosure control, not de-identification.
   own policies.
 - Lexical full-text matching can miss semantically related records; calculated
   matching counts describe the deterministic query scope, not semantic recall.
+- The natural-language compiler selects one primary operation and does not
+  compose mixed-scope modifiers. Callers must inspect the resulting plan or ask
+  one scoped question at a time when an intersection matters.
+- The default evidence selection target is 100 records, but callers can request
+  a different target. The enforced transmission boundary is the 256 KiB
+  immutable provider request body, not a fixed record count.
 - v0.1 is an alpha release and is not externally audited.
 
 An independent security review is required before a stable v1.0 release.

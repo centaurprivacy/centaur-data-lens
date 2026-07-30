@@ -144,26 +144,37 @@ def test_complete_manifest_and_aggregates_are_archive_wide(tmp_path: Path) -> No
                 b"synthetic-media",
             )
         archive.writestr("Takeout/Other/nested.zip", b"synthetic-nested-archive")
+        archive.writestr(
+            "Takeout/Other/private.SYNTHETIC_PRIVATE_MARKER",
+            b"synthetic-private-format",
+        )
 
     with AnalysisSession() as session:
         analyze_sources(session, [SourceSpec("google", export)])
         manifest = session.manifest
         overview = session.query("summarize this export")
+        prepared = prepare_question(overview, LocalEnvelopeAdapter())
 
-    assert manifest.entry_count == 182
-    assert len(manifest.entries) == 182
+    assert manifest.entry_count == 183
+    assert len(manifest.entries) == 183
     assert manifest.parser_supported_entries == 1
-    assert manifest.parser_unsupported_entries == 181
+    assert manifest.parser_unsupported_entries == 182
     assert manifest.nested_archive_count == 1
-    assert sum(group.entry_count for group in manifest.formats) == 182
-    assert {group.name for group in manifest.formats} == {".jpg", ".json", ".zip"}
-    assert sum(group.entry_count for group in manifest.products) == 182
+    assert sum(group.entry_count for group in manifest.formats) == 183
+    assert {group.name for group in manifest.formats} == {
+        ".jpg",
+        ".json",
+        ".zip",
+        "[other]",
+    }
+    assert sum(group.entry_count for group in manifest.products) == 183
     assert manifest.uncompressed_size == sum(entry.uncompressed_size for entry in manifest.entries)
     assert overview.total_records == 1
     assert overview.matching_records == 1
     assert any(fact.metric == "archive_entry_count" for fact in overview.facts)
     assert any(fact.metric == "parser_unsupported_entry_count" for fact in overview.facts)
     assert any(not fact.transmittable and "product" in fact.dimensions for fact in overview.facts)
+    assert "synthetic_private_marker" not in prepared.payload.lower()
 
 
 def test_compiler_covers_all_allowlisted_plan_families() -> None:
@@ -331,6 +342,53 @@ def test_ambiguous_unsupported_and_absence_statuses_are_distinct() -> None:
     assert ambiguous.message
     assert unsupported.status == QueryStatus.UNSUPPORTED
     assert unsupported.message
+
+
+def test_unsupported_category_is_not_reported_as_empty_data() -> None:
+    with AnalysisSession() as session:
+        session.add_manifest_entries(
+            (
+                ManifestEntry(
+                    source_id="synthetic-source",
+                    platform="meta",
+                    internal_path="unsupported/search.json",
+                    product="search_history",
+                    extension=".json",
+                    compressed_size=10,
+                    uncompressed_size=20,
+                    nested_archive=False,
+                    parser_supported=False,
+                ),
+                ManifestEntry(
+                    source_id="synthetic-source",
+                    platform="meta",
+                    internal_path="supported/advertising.json",
+                    product="advertising",
+                    extension=".json",
+                    compressed_size=10,
+                    uncompressed_size=20,
+                    nested_archive=False,
+                    parser_supported=True,
+                ),
+            )
+        )
+        session.add_record(
+            _record(
+                "000000000000000000000001",
+                platform="meta",
+                category="advertising",
+            )
+        )
+        session.commit()
+        facet = session.query("what did I search for?")
+        comparison = session.query("compare search history and advertising")
+
+    for result in (facet, comparison):
+        assert result.status == QueryStatus.PRODUCT_UNSUPPORTED
+        assert any(
+            note.code == "product_present_but_unsupported" and note.category == "search_history"
+            for note in result.coverage_notes
+        )
 
 
 def test_plans_facts_and_injection_handling_are_deterministic() -> None:

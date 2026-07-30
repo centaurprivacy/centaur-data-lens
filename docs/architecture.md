@@ -12,7 +12,7 @@ safe ArchiveReader → local manifest + provider parser → NormalizedRecord
                                                      complete local query
                                                                ↓
                                                     QueryResult facts +
-                                                    bounded evidence
+                                                 request-size-bounded evidence
                                                                ↓
                                                     immutable prepared question
                                                    ↓
@@ -31,9 +31,10 @@ exclusions, validation, and its parser. A new platform is registered in one
 place.
 
 `AnalysisSession` calculates fixed archive and matching facts over the complete
-local query scope. It selects a bounded evidence set diversified across
-platform, category, time, and repeated value groups. Calculated facts and
-records have separate citation namespaces.
+local query scope. It selects a configurable evidence set diversified across
+platform, category, time, and repeated value groups; final model preparation is
+bounded by the immutable request-body size. Calculated facts and records have
+separate citation namespaces.
 
 The local archive manifest and typed query contracts are documented in
 [`local-query-engine.md`](local-query-engine.md). Query planning and execution

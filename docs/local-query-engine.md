@@ -16,7 +16,9 @@ parser-supported versus unsupported entry counts. Entry `source_id` and
 `internal_path` fields are provenance only. They are never serialized by model
 preparation. Product labels are path-derived, so product-level facts are also
 marked local-only; safe aggregate counts, sizes, extensions, and parser coverage
-may be included downstream.
+may be included downstream. Extensions enter downstream facts only when they
+match a short fixed allowlist; every other filename suffix is aggregated as
+`[other]`.
 
 ## Planning
 
@@ -37,6 +39,13 @@ The compiler uses local parsing only. It cannot emit SQL or code. Full-text term
 and record IDs become SQLite parameters; identifiers and SQL templates are
 selected exclusively from local enums.
 
+The compiler chooses one primary operation by deterministic precedence. It does
+not compose mixed scopes. For example, a device-facet question with additional
+search text remains a device-facet plan; the extra text does not create an
+intersection. Callers should inspect the returned `QueryPlan`, construct an
+explicit supported plan, or ask one scoped question at a time when modifiers
+must be combined.
+
 ## Results and PR-B integration
 
 `AnalysisSession.query()` compiles and executes a plan across the complete
@@ -46,9 +55,14 @@ bounded evidence sample. `QueryResult` contains:
 - the exact plan and status
 - total and matching record counts
 - stable `CalculatedFact` IDs
-- at most 100 diversified evidence candidates by default
+- diversified evidence candidates, with a caller-configurable target that
+  defaults to 100
 - local provenance retained on evidence records
 - structured `CoverageNote` and `QueryAssumption` values
+
+The default of 100 evidence candidates is not a hard transmission cap. Final
+model preparation adds candidates only while the complete immutable provider
+request remains within 256 KiB.
 
 Statuses distinguish no record matches, absent facet data, a present but
 unsupported product, and a product/category that is not present. Ambiguous and
@@ -57,9 +71,11 @@ unsupported questions are coverage-only local results and never invoke a model.
 PR-B should keep a `QueryResult` as the turn boundary. It may render local
 clarifications directly or pass a successful result to
 `prepare_question(query_result, adapter)`. It must not reconstruct retrieval from
-conversation text, silently broaden a no-match result, or transmit manifest
-entry paths/source IDs. Record-detail follow-ups must carry explicit result IDs
-from an earlier `QueryResult`.
+conversation text or transmit manifest entry paths/source IDs. Because the local
+compiler does not compose mixed scopes, PR-B must present the selected plan or
+ask for clarification when its interaction design requires modifier
+intersections. Record-detail follow-ups must carry explicit result IDs from an
+earlier `QueryResult`.
 
 Known unsupported forms include causal “why” analysis, recommendations,
 predictions, pronoun resolution, and implicit follow-up references. Callers

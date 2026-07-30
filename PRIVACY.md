@@ -22,12 +22,19 @@ schema version and per-platform category counts—not record values or paths.
 ## Optional AI
 
 Q&A first calculates archive-wide and question-matching facts in the local
-ephemeral index. It then selects no more than 100 diversified evidence records
-within a 256 KiB provider request-body cap. Natural-language modifiers are
-removed locally, and device, service, and hostname questions use deterministic
-field-presence retrieval. When no records match, Centaur returns a deterministic
-local no-match answer and makes no model request. Counts and other derived facts
-describe one person's export and must themselves be treated as personal data.
+ephemeral index. It then selects a diversified evidence set within a 256 KiB
+provider request-body cap. Query execution defaults to 100 evidence candidates,
+but that is a caller-configurable selection target rather than a transmission
+limit; the immutable request-body size is the final transmission boundary.
+
+The natural-language compiler selects one primary allowlisted operation. It does
+not compose mixed scopes: additional text in a facet, date, trend, overview, or
+comparison question may not narrow the selected operation. Callers that require
+intersections must construct an explicit supported plan or ask one scoped
+question at a time. When no records match the selected plan, Centaur returns a
+deterministic local no-match answer and makes no model request. Counts and other
+derived facts describe one person's export and must themselves be treated as
+personal data.
 
 Ollama is restricted to the local loopback interface and is the recommended
 provider. A validated OpenAI-compatible loopback endpoint is also local. Local
