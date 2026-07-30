@@ -123,6 +123,7 @@ def test_question_context_handles_broad_and_no_match_questions() -> None:
     with AnalysisSession() as session:
         _add_large_synthetic_dataset(session)
         broad = session.question_context("Give me an overview of my data export")
+        summary = session.question_context("summarize this export")
         privacy_related = session.question_context("privacy-related activity")
         incompatible = session.question_context("privacy video")
         late_meaningful_term = session.question_context(" ".join(["what"] * 25 + ["privacy"]))
@@ -133,6 +134,9 @@ def test_question_context_handles_broad_and_no_match_questions() -> None:
     assert broad.selection_mode == "archive"
     assert broad.matching_records == 240
     assert len(broad.records) == 100
+    assert summary.selection_mode == "archive"
+    assert summary.matching_records == 240
+    assert len(summary.records) == 100
     assert privacy_related.matching_records == 180
     assert privacy_related.matching_records == different.matching_records
     assert incompatible.matching_records == 0
@@ -162,6 +166,45 @@ def test_natural_question_modifiers_preserve_search_and_facet_intent() -> None:
         assert context.selection_mode == "full_text_all_terms"
         assert context.matching_records == 240
         assert len(context.records) == 100
+
+
+def test_sparse_export_distinguishes_archive_summary_from_missing_facets() -> None:
+    with AnalysisSession() as session:
+        session.add_record(
+            NormalizedRecord(
+                record_id="synthetic-install",
+                platform="google",
+                category="app_installs",
+                activity_type="app installs",
+                service="Google Play Store",
+                title="Installed Synthetic App",
+                sources=(
+                    SourceReference(
+                        archive_id="synthetic-archive",
+                        internal_path="synthetic/installs.json",
+                        pointer="/0",
+                    ),
+                ),
+            )
+        )
+        session.commit()
+        summary = session.question_context("summarize this export")
+        devices = session.question_context("Which devices are present?")
+        searches = session.question_context("What did I search for?")
+        services = session.question_context("What services appear most often?")
+
+    assert summary.selection_mode == "archive"
+    assert summary.matching_records == 1
+    assert devices.selection_mode == "no_match"
+    assert devices.no_match_message == (
+        "No device values were found in the supported records from this export."
+    )
+    assert searches.selection_mode == "no_match"
+    assert searches.no_match_message == (
+        "No supported search-history records were found in this export."
+    )
+    assert services.selection_mode == "full_text_all_terms"
+    assert services.matching_records == 1
 
 
 def test_analysis_reports_unique_indexed_and_parsed_counts(tmp_path: Path) -> None:

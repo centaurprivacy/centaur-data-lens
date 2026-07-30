@@ -36,6 +36,8 @@ _QUESTION_STOP_WORDS = frozenset(
         "activity",
         "all",
         "an",
+        "analyse",
+        "analyze",
         "and",
         "appear",
         "appears",
@@ -44,6 +46,7 @@ _QUESTION_STOP_WORDS = frozenset(
         "common",
         "commonly",
         "data",
+        "describe",
         "did",
         "do",
         "does",
@@ -77,6 +80,9 @@ _QUESTION_STOP_WORDS = frozenset(
         "records",
         "related",
         "show",
+        "summarise",
+        "summarize",
+        "summary",
         "tell",
         "the",
         "there",
@@ -195,18 +201,43 @@ class QuestionContext:
     selection_mode: str
     facts: tuple[CalculatedFact, ...]
     records: tuple[NormalizedRecord, ...]
+    no_match_message: str | None = None
 
 
-def _fts_query(question: str, *, require_all: bool = False) -> str | None:
-    tokens = [
+def _question_tokens(question: str) -> list[str]:
+    return [
         _QUESTION_TOKEN_ALIASES.get(token, token)
         for token in _FTS_TOKEN_RE.findall(question.lower())
         if token not in _QUESTION_STOP_WORDS
     ][:20]
+
+
+def _fts_query(question: str, *, require_all: bool = False) -> str | None:
+    tokens = _question_tokens(question)
     if not tokens:
         return None
     operator = " AND " if require_all else " OR "
     return operator.join(f'"{token.replace(chr(34), "")}"' for token in tokens)
+
+
+def _no_match_message(question: str) -> str:
+    tokens = set(_question_tokens(question))
+    facet_messages = {
+        "centaurfacetdevice": (
+            "No device values were found in the supported records from this export."
+        ),
+        "centaurfacethostname": (
+            "No hostname values were found in the supported records from this export."
+        ),
+        "centaurfacetservice": (
+            "No service values were found in the supported records from this export."
+        ),
+        "search": "No supported search-history records were found in this export.",
+    }
+    for token, message in facet_messages.items():
+        if token in tokens:
+            return message
+    return "No matching records were found for this question."
 
 
 def _fact(
@@ -729,6 +760,11 @@ class AnalysisSession:
             ),
             facts=tuple(facts),
             records=self._diversify(candidates, limit=evidence_limit),
+            no_match_message=(
+                _no_match_message(question)
+                if aggregate_query is not None and not matching_records
+                else None
+            ),
         )
 
     def snapshot(self) -> PrivacySnapshot:

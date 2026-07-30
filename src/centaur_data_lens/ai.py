@@ -631,7 +631,10 @@ def prepare_question(
         local_answer = AIAnswer(
             claims=[
                 AIClaim(
-                    text="No matching records were found for this question.",
+                    text=(
+                        context.no_match_message
+                        or "No matching records were found for this question."
+                    ),
                     kind=AIClaimKind.CALCULATED,
                     record_ids=[],
                     fact_ids=[no_match_fact.fact_id],

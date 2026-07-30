@@ -17,6 +17,7 @@ from centaur_data_lens.ai import (
 )
 from centaur_data_lens.analysis import AnalysisSession, SourceSpec, analyze_sources
 from centaur_data_lens.errors import ModelAdapterError
+from centaur_data_lens.models import NormalizedRecord, SourceReference
 
 
 class FakeAdapter:
@@ -436,6 +437,36 @@ def test_no_match_question_is_answered_locally_without_archive_facts(
     assert decoded["calculated_facts"][0]["value"] == 0
     answer = answer_question(prepared, adapter=adapter, allow_cloud=False)
     assert answer.claims[0].text == "No matching records were found for this question."
+    assert adapter.calls == 0
+
+
+def test_missing_device_facet_has_specific_local_answer() -> None:
+    adapter = FakeAdapter({"claims": []})
+    with AnalysisSession() as session:
+        session.add_record(
+            NormalizedRecord(
+                record_id="synthetic-install",
+                platform="google",
+                category="app_installs",
+                activity_type="app installs",
+                service="Google Play Store",
+                title="Installed Synthetic App",
+                sources=(
+                    SourceReference(
+                        archive_id="synthetic-archive",
+                        internal_path="synthetic/installs.json",
+                        pointer="/0",
+                    ),
+                ),
+            )
+        )
+        session.commit()
+        prepared = prepare_question(session, "Which devices are present?", adapter)
+        answer = answer_question(prepared, adapter=adapter, allow_cloud=False)
+
+    assert answer.claims[0].text == (
+        "No device values were found in the supported records from this export."
+    )
     assert adapter.calls == 0
 
 
