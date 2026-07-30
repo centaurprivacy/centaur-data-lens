@@ -247,7 +247,10 @@ def _parse_timestamp(value: Mapping[str, Any]) -> tuple[datetime | None, str | N
         if isinstance(raw, Mapping):
             raw = raw.get("timestamp") or raw.get("value")
         if isinstance(raw, (int, float)):
-            numeric = float(raw)
+            try:
+                numeric = float(raw)
+            except OverflowError:
+                continue
             precision = "second"
             if numeric > 100_000_000_000_000:
                 numeric /= 1_000_000

@@ -3,13 +3,18 @@
 ```text
 explicit platform choice
           ↓
-safe ArchiveReader → provider parser → NormalizedRecord
-                                          ↓
-                               ephemeral SQLite + FTS5
-                                 ↙                ↘
-                    deterministic report    facts + diversified evidence
-                         ↓                          ↓
-                  offline HTML/MD/JSON     immutable prepared question
+safe ArchiveReader → local manifest + provider parser → NormalizedRecord
+                                                        ↓
+                                             ephemeral SQLite + FTS5
+                                               ↙                ↘
+                                  deterministic report    typed QueryPlan
+                                                               ↓
+                                                     complete local query
+                                                               ↓
+                                                    QueryResult facts +
+                                                 request-size-bounded evidence
+                                                               ↓
+                                                    immutable prepared question
                                                    ↓
                                       loopback model (default) or
                                       authorized cloud adapter (advanced)
@@ -26,9 +31,15 @@ exclusions, validation, and its parser. A new platform is registered in one
 place.
 
 `AnalysisSession` calculates fixed archive and matching facts over the complete
-local query scope. It selects a bounded evidence set diversified across
-platform, category, time, and repeated value groups. Calculated facts and
-records have separate citation namespaces.
+local query scope. It selects a configurable evidence set diversified across
+platform, category, time, and repeated value groups; final model preparation is
+bounded by the immutable request-body size. Calculated facts and records have
+separate citation namespaces.
+
+The local archive manifest and typed query contracts are documented in
+[`local-query-engine.md`](local-query-engine.md). Query planning and execution
+are deterministic and network-free; plans select fixed operations and pass only
+parameters to SQLite.
 
 `ModelAdapter` exposes destination and locality metadata, deterministic
 request-body construction, and one completion operation. A prepared question
