@@ -10,6 +10,13 @@
       diagnostics, reports, and artifacts.
 - [ ] Cloud destinations use verified TLS, no redirects, no ambient proxies, a
       bounded response, and explicit confirmation.
+- [ ] Cloud preview measures the exact immutable provider request body,
+      including the system prompt, static schema, and provider envelope, and
+      confirmation is required again for every transmitted question.
+- [ ] Cloud schemas contain no personal fact or record IDs; citations are
+      validated locally.
+- [ ] Model payloads exclude source paths, archive identifiers, internal
+      filenames, and API keys.
 - [ ] Model records are bounded and model output cannot execute tools or code.
 - [ ] Ruff, strict mypy, pytest with coverage, package build, and dependency
       audit pass.

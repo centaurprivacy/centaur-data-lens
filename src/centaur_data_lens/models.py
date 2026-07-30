@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -15,6 +15,7 @@ class ClaimKind(StrEnum):
 
 class AIClaimKind(StrEnum):
     OBSERVED = "observed"
+    CALCULATED = "calculated"
     INFERENCE = "inference"
 
 
@@ -80,12 +81,27 @@ class PrivacySnapshot(BaseModel):
     omissions: dict[str, list[str]]
 
 
+class CalculatedFact(BaseModel):
+    """A deterministic local calculation that can be cited by a model."""
+
+    model_config = ConfigDict(frozen=True)
+
+    fact_id: str
+    scope: Literal["archive", "matching"]
+    scope_definition: str
+    metric: str
+    value: str | int | float
+    dimensions: dict[str, str] = Field(default_factory=dict)
+    provenance: str
+
+
 class AIClaim(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(max_length=4_000)
     kind: AIClaimKind
     record_ids: list[str] = Field(default_factory=list, max_length=100)
+    fact_ids: list[str] = Field(default_factory=list, max_length=100)
 
     @field_validator("text")
     @classmethod

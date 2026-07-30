@@ -7,9 +7,12 @@ safe ArchiveReader → provider parser → NormalizedRecord
                                           ↓
                                ephemeral SQLite + FTS5
                                  ↙                ↘
-                    deterministic report       selected context
+                    deterministic report    facts + diversified evidence
                          ↓                          ↓
-                  offline HTML/MD/JSON     local or BYOK adapter
+                  offline HTML/MD/JSON     immutable prepared question
+                                                   ↓
+                                      loopback model (default) or
+                                      authorized cloud adapter (advanced)
 ```
 
 The wizard and direct commands call the same application services. Platform
@@ -22,9 +25,18 @@ infer or switch platforms.
 exclusions, validation, and its parser. A new platform is registered in one
 place.
 
-`ModelAdapter` exposes destination and locality metadata plus one completion
-operation. Model output is parsed into cited `AIAnswer` claims. Adapters receive
-only locally selected normalized records and have no tools.
+`AnalysisSession` calculates fixed archive and matching facts over the complete
+local query scope. It selects a bounded evidence set diversified across
+platform, category, time, and repeated value groups. Calculated facts and
+records have separate citation namespaces.
+
+`ModelAdapter` exposes destination and locality metadata, deterministic
+request-body construction, and one completion operation. A prepared question
+freezes the exact provider request-body bytes, preview, and valid fact/record IDs
+before authorization. Cloud schemas are static; citation IDs stay in message
+content and are validated locally. No-match questions return a deterministic
+local answer and never invoke an adapter. Adapters receive no source paths,
+archive identifiers, internal filenames, or tools.
 
 ## Ephemeral state
 
