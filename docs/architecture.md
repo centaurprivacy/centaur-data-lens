@@ -3,13 +3,18 @@
 ```text
 explicit platform choice
           ↓
-safe ArchiveReader → provider parser → NormalizedRecord
-                                          ↓
-                               ephemeral SQLite + FTS5
-                                 ↙                ↘
-                    deterministic report    facts + diversified evidence
-                         ↓                          ↓
-                  offline HTML/MD/JSON     immutable prepared question
+safe ArchiveReader → local manifest + provider parser → NormalizedRecord
+                                                        ↓
+                                             ephemeral SQLite + FTS5
+                                               ↙                ↘
+                                  deterministic report    typed QueryPlan
+                                                               ↓
+                                                     complete local query
+                                                               ↓
+                                                    QueryResult facts +
+                                                    bounded evidence
+                                                               ↓
+                                                    immutable prepared question
                                                    ↓
                                       loopback model (default) or
                                       authorized cloud adapter (advanced)
@@ -29,6 +34,11 @@ place.
 local query scope. It selects a bounded evidence set diversified across
 platform, category, time, and repeated value groups. Calculated facts and
 records have separate citation namespaces.
+
+The local archive manifest and typed query contracts are documented in
+[`local-query-engine.md`](local-query-engine.md). Query planning and execution
+are deterministic and network-free; plans select fixed operations and pass only
+parameters to SQLite.
 
 `ModelAdapter` exposes destination and locality metadata, deterministic
 request-body construction, and one completion operation. A prepared question

@@ -6,7 +6,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Protocol, cast, overload
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -20,6 +20,8 @@ from centaur_data_lens.models import (
     AIClaimKind,
     CalculatedFact,
     NormalizedRecord,
+    QueryResult,
+    QueryStatus,
 )
 
 _MAX_REQUEST_BYTES = 256 * 1024
@@ -544,7 +546,7 @@ def _record_context(record: NormalizedRecord) -> dict[str, object]:
 
 
 def _fact_context(fact: CalculatedFact) -> dict[str, object]:
-    return fact.model_dump(mode="json")
+    return fact.model_dump(mode="json", exclude={"transmittable"})
 
 
 def _fact_sensitivity_classes(facts: list[CalculatedFact]) -> set[str]:
@@ -571,22 +573,58 @@ def _fact_sensitivity_classes(facts: list[CalculatedFact]) -> set[str]:
     return classes
 
 
+@overload
 def prepare_question(
-    session: AnalysisSession,
-    question: str,
+    source: QueryResult,
+    question_or_adapter: ModelAdapter,
+    adapter: None = None,
+) -> PreparedQuestion: ...
+
+
+@overload
+def prepare_question(
+    source: AnalysisSession,
+    question_or_adapter: str,
+    adapter: ModelAdapter,
+) -> PreparedQuestion: ...
+
+
+def prepare_question(
+    source: AnalysisSession | QueryResult,
+    question_or_adapter: str | ModelAdapter,
+    adapter: ModelAdapter | None = None,
+) -> PreparedQuestion:
+    """Prepare an explicit QueryResult, with a legacy session/question wrapper."""
+
+    if isinstance(source, QueryResult):
+        if adapter is not None or isinstance(question_or_adapter, str):
+            raise TypeError("QueryResult preparation accepts exactly one model adapter.")
+        return _prepare_query_result(source, question_or_adapter)
+    if adapter is None or not isinstance(question_or_adapter, str):
+        raise TypeError("Session preparation requires a question and model adapter.")
+    if len(question_or_adapter.encode()) > _MAX_REQUEST_BYTES:
+        raise ModelAdapterError("The question exceeds the safe request size limit.")
+    return _prepare_query_result(source.query(question_or_adapter), adapter)
+
+
+def _prepare_query_result(
+    result: QueryResult,
     adapter: ModelAdapter,
 ) -> PreparedQuestion:
+    question = result.plan.question
     if len(question.encode()) > _MAX_REQUEST_BYTES:
         raise ModelAdapterError("The question exceeds the safe request size limit.")
-    context = session.question_context(question)
-    if context.total_records == 0:
+    if result.total_records == 0 and result.status == QueryStatus.OK:
         raise ModelAdapterError("No supported records are available to answer this question.")
 
     scope = {
-        "total_records": context.total_records,
-        "matching_records": context.matching_records,
-        "selection_mode": context.selection_mode,
+        "total_records": result.total_records,
+        "matching_records": result.matching_records,
+        "selection_mode": result.plan.operation.value,
+        "query_intent": result.plan.intent.value,
+        "query_status": result.status.value,
     }
+    transmittable_facts = tuple(fact for fact in result.facts if fact.transmittable)
 
     def serialize(
         facts: list[CalculatedFact],
@@ -596,6 +634,9 @@ def prepare_question(
             {
                 "question": question,
                 "scope": scope,
+                "assumptions": [
+                    assumption.model_dump(mode="json") for assumption in result.assumptions
+                ],
                 "calculated_facts": [_fact_context(fact) for fact in facts],
                 "evidence_records": [_record_context(record) for record in records],
             },
@@ -616,12 +657,20 @@ def prepare_question(
             answer_schema=answer_schema,
         )
 
-    if context.selection_mode == "no_match":
-        no_match_fact = context.facts[0]
+    if result.status != QueryStatus.OK:
+        if not transmittable_facts:
+            raise ModelAdapterError("The local coverage result has no transmittable fact.")
+        no_match_fact = next(
+            (fact for fact in transmittable_facts if fact.scope == "matching"),
+            transmittable_facts[0],
+        )
         payload = json.dumps(
             {
                 "question": question,
                 "scope": scope,
+                "assumptions": [
+                    assumption.model_dump(mode="json") for assumption in result.assumptions
+                ],
                 "calculated_facts": [_fact_context(no_match_fact)],
                 "evidence_records": [],
             },
@@ -631,10 +680,7 @@ def prepare_question(
         local_answer = AIAnswer(
             claims=[
                 AIClaim(
-                    text=(
-                        context.no_match_message
-                        or "No matching records were found for this question."
-                    ),
+                    text=(result.message or "No matching records were found for this question."),
                     kind=AIClaimKind.CALCULATED,
                     record_ids=[],
                     fact_ids=[no_match_fact.fact_id],
@@ -647,9 +693,13 @@ def prepare_question(
                 model=adapter.model,
                 destination=adapter.destination,
                 is_local=adapter.is_local,
-                data_mode="local_no_match",
-                total_records=context.total_records,
-                matching_records=0,
+                data_mode=(
+                    "local_no_match"
+                    if result.status == QueryStatus.NO_MATCHING_RECORDS
+                    else "local_coverage"
+                ),
+                total_records=result.total_records,
+                matching_records=result.matching_records,
                 fact_count=0,
                 record_count=0,
                 payload_bytes=0,
@@ -670,7 +720,7 @@ def prepare_question(
         raise ModelAdapterError("The question exceeds the safe request size limit.")
 
     included_facts: list[CalculatedFact] = []
-    for fact in context.facts:
+    for fact in transmittable_facts:
         candidate_facts = [*included_facts, fact]
         candidate_payload, candidate_body = serialize(candidate_facts, [])
         if len(candidate_body) > _MAX_REQUEST_BYTES:
@@ -682,7 +732,7 @@ def prepare_question(
         raise ModelAdapterError("The question leaves no room for required analysis context.")
 
     included_records: list[NormalizedRecord] = []
-    for record in context.records:
+    for record in result.evidence:
         candidate_records = [*included_records, record]
         candidate_payload, candidate_body = serialize(included_facts, candidate_records)
         if len(candidate_body) > _MAX_REQUEST_BYTES:
@@ -701,6 +751,10 @@ def prepare_question(
         "scope.total_records",
         "scope.matching_records",
         "scope.selection_mode",
+        "scope.query_intent",
+        "scope.query_status",
+        "assumptions.code",
+        "assumptions.message",
         "calculated_facts.fact_id",
         "calculated_facts.scope",
         "calculated_facts.scope_definition",
@@ -723,8 +777,8 @@ def prepare_question(
         destination=adapter.destination,
         is_local=adapter.is_local,
         data_mode="local_raw" if adapter.is_local else "cloud_raw_personal_data",
-        total_records=context.total_records,
-        matching_records=context.matching_records,
+        total_records=result.total_records,
+        matching_records=result.matching_records,
         fact_count=len(included_facts),
         record_count=len(included_records),
         payload_bytes=len(request_body),

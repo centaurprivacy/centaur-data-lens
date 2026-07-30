@@ -93,6 +93,146 @@ class CalculatedFact(BaseModel):
     value: str | int | float
     dimensions: dict[str, str] = Field(default_factory=dict)
     provenance: str
+    transmittable: bool = True
+
+
+class QueryIntent(StrEnum):
+    ARCHIVE_OVERVIEW = "archive_overview"
+    DATE_LOOKUP = "date_lookup"
+    FACET = "facet"
+    TREND = "trend"
+    COMPARISON = "comparison"
+    FULL_TEXT = "full_text"
+    RECORD_DETAIL = "record_detail"
+    CLARIFICATION = "clarification"
+    UNSUPPORTED = "unsupported"
+
+
+class QueryOperation(StrEnum):
+    ARCHIVE_OVERVIEW = "archive_overview"
+    DATE_RANGE = "date_range"
+    FACET_COUNTS = "facet_counts"
+    TIME_BUCKETS = "time_buckets"
+    PLATFORM_COMPARISON = "platform_comparison"
+    CATEGORY_COMPARISON = "category_comparison"
+    FULL_TEXT_MATCH = "full_text_match"
+    RECORD_BY_ID = "record_by_id"
+    COVERAGE_ONLY = "coverage_only"
+
+
+class QueryFacet(StrEnum):
+    SERVICE = "service"
+    DEVICE = "device"
+    HOSTNAME = "hostname"
+    ACTIVITY_TYPE = "activity_type"
+
+
+class QueryStatus(StrEnum):
+    OK = "ok"
+    NO_MATCHING_RECORDS = "no_matching_records"
+    MATCHING_DATA_ABSENT = "matching_data_absent"
+    PRODUCT_UNSUPPORTED = "product_present_but_unsupported"
+    NOT_PRESENT = "product_or_category_not_present"
+    CLARIFICATION_REQUIRED = "clarification_required"
+    UNSUPPORTED = "unsupported"
+
+
+class QueryAssumption(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    code: str
+    message: str
+
+
+class CoverageNote(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    code: str
+    message: str
+    platform: str | None = None
+    category: str | None = None
+    product: str | None = None
+
+
+class QueryScope(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    platforms: tuple[str, ...] = ()
+    categories: tuple[str, ...] = ()
+    facet: QueryFacet | None = None
+    text_terms: tuple[str, ...] = ()
+    record_ids: tuple[str, ...] = ()
+    start_utc: datetime | None = None
+    end_utc: datetime | None = None
+    timezone: str | None = None
+
+
+class QueryPlan(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    plan_id: str
+    question: str
+    intent: QueryIntent
+    operation: QueryOperation
+    scope: QueryScope = Field(default_factory=QueryScope)
+    assumptions: tuple[QueryAssumption, ...] = ()
+    clarification: str | None = None
+
+
+class ManifestEntry(BaseModel):
+    """Local-only metadata for one safely inventoried archive entry."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_id: str
+    platform: str
+    internal_path: str
+    product: str
+    extension: str
+    compressed_size: int
+    uncompressed_size: int
+    nested_archive: bool
+    parser_supported: bool
+
+
+class ManifestGroup(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    entry_count: int
+    compressed_size: int
+    uncompressed_size: int
+    parser_supported_entries: int
+
+
+class ArchiveManifest(BaseModel):
+    """Complete local inventory. Entry paths and source IDs must not be serialized to models."""
+
+    model_config = ConfigDict(frozen=True)
+
+    entries: tuple[ManifestEntry, ...] = ()
+    products: tuple[ManifestGroup, ...] = ()
+    formats: tuple[ManifestGroup, ...] = ()
+    entry_count: int = 0
+    compressed_size: int = 0
+    uncompressed_size: int = 0
+    nested_archive_count: int = 0
+    parser_supported_entries: int = 0
+    parser_unsupported_entries: int = 0
+
+
+class QueryResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    plan: QueryPlan
+    status: QueryStatus
+    total_records: int
+    matching_records: int
+    facts: tuple[CalculatedFact, ...] = ()
+    evidence: tuple[NormalizedRecord, ...] = ()
+    coverage_notes: tuple[CoverageNote, ...] = ()
+    assumptions: tuple[QueryAssumption, ...] = ()
+    message: str | None = None
 
 
 class AIClaim(BaseModel):

@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
@@ -17,13 +17,24 @@ from typing import Literal
 from centaur_data_lens.archive import ArchiveReader
 from centaur_data_lens.errors import DataLensError
 from centaur_data_lens.models import (
+    ArchiveManifest,
     CalculatedFact,
     CoverageItem,
     EvidenceItem,
+    ManifestEntry,
     NormalizedRecord,
     PrivacySnapshot,
+    QueryPlan,
+    QueryResult,
+    QueryStatus,
 )
 from centaur_data_lens.platforms import get_platform
+from centaur_data_lens.query import (
+    build_manifest,
+    compile_query,
+    execute_query,
+    manifest_entries,
+)
 from centaur_data_lens.security import cleanup_stale_sessions, secure_temp_directory
 
 ProgressCallback = Callable[[str], None]
@@ -314,11 +325,56 @@ class AnalysisSession:
             );
             """
         )
+        self._manifest_entries: list[ManifestEntry] = []
         self._closed = False
 
     @property
     def database_path(self) -> Path:
         return self._database_path
+
+    @property
+    def manifest(self) -> ArchiveManifest:
+        return build_manifest(self._manifest_entries)
+
+    def add_manifest_entries(self, entries: Sequence[ManifestEntry]) -> None:
+        self._manifest_entries.extend(entries)
+
+    def compile_query(
+        self,
+        question: str,
+        *,
+        timezone: str | tzinfo | None = None,
+    ) -> QueryPlan:
+        return compile_query(question, timezone=timezone)
+
+    def execute_query(
+        self,
+        plan: QueryPlan,
+        *,
+        candidate_limit: int = 1_000,
+        evidence_limit: int = 100,
+    ) -> QueryResult:
+        return execute_query(
+            self._connection,
+            self.manifest,
+            plan,
+            candidate_limit=candidate_limit,
+            evidence_limit=evidence_limit,
+        )
+
+    def query(
+        self,
+        question: str,
+        *,
+        timezone: str | tzinfo | None = None,
+        candidate_limit: int = 1_000,
+        evidence_limit: int = 100,
+    ) -> QueryResult:
+        return self.execute_query(
+            self.compile_query(question, timezone=timezone),
+            candidate_limit=candidate_limit,
+            evidence_limit=evidence_limit,
+        )
 
     def add_record(self, record: NormalizedRecord) -> bool:
         existing_row = self._connection.execute(
@@ -707,64 +763,25 @@ class AnalysisSession:
         candidate_limit: int = 1_000,
         evidence_limit: int = 100,
     ) -> QuestionContext:
-        total_records = self._matching_count(None)
-        aggregate_query = _fts_query(question, require_all=True)
-        matching_records = self._matching_count(aggregate_query)
-        archive_facts = self._scope_facts(
-            scope="archive",
-            query=None,
-            record_count=total_records,
+        result = self.query(
+            question,
+            candidate_limit=candidate_limit,
+            evidence_limit=evidence_limit,
         )
-        if aggregate_query is None:
-            facts = [
-                archive_facts[0],
-                _fact(
-                    scope="matching",
-                    scope_definition="all_supported_records",
-                    metric="record_count",
-                    value=matching_records,
-                ),
-            ]
-            facts.extend(archive_facts[1:])
-        elif matching_records:
-            matching_facts = self._scope_facts(
-                scope="matching",
-                query=aggregate_query,
-                record_count=matching_records,
-            )
-            facts = [archive_facts[0], matching_facts[0]]
-            facts.extend(matching_facts[1:])
-            facts.extend(archive_facts[1:])
-        else:
-            facts = [
-                _fact(
-                    scope="matching",
-                    scope_definition=(
-                        f"full_text_query_sha256:"
-                        f"{sha256(aggregate_query.encode('utf-8')).hexdigest()}"
-                    ),
-                    metric="record_count",
-                    value=0,
-                )
-            ]
-        candidates = self._candidate_records(aggregate_query, limit=candidate_limit)
+        no_match = result.status != QueryStatus.OK
         return QuestionContext(
-            total_records=total_records,
-            matching_records=matching_records,
+            total_records=result.total_records,
+            matching_records=result.matching_records,
             selection_mode=(
                 "archive"
-                if aggregate_query is None
+                if result.plan.operation.value == "archive_overview"
                 else "full_text_all_terms"
-                if matching_records
+                if not no_match
                 else "no_match"
             ),
-            facts=tuple(facts),
-            records=self._diversify(candidates, limit=evidence_limit),
-            no_match_message=(
-                _no_match_message(question)
-                if aggregate_query is not None and not matching_records
-                else None
-            ),
+            facts=result.facts,
+            records=result.evidence,
+            no_match_message=result.message,
         )
 
     def snapshot(self) -> PrivacySnapshot:
@@ -938,6 +955,13 @@ def analyze_sources(
         parsed_count = 0
         indexed_count = 0
         with ArchiveReader(paths, allow_large_archive=allow_large_archive) as reader:
+            session.add_manifest_entries(
+                manifest_entries(
+                    platform=platform_id,
+                    entries=reader.entries,
+                    parser=parser,
+                )
+            )
             parser.validate(reader)
             for record in parser.iter_records(reader):
                 parsed_count += 1
