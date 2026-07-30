@@ -49,6 +49,43 @@ content and are validated locally. No-match questions return a deterministic
 local answer and never invoke an adapter. Adapters receive no source paths,
 archive identifiers, internal filenames, or tools.
 
+## Conversational orchestration
+
+`chat` adds orchestration around the same `AnalysisSession`, `QueryPlan`,
+`QueryResult`, preparation, and claim-validation interfaces used by one-shot
+`ask`. Source validation and indexing happen once. The provider adapter and
+model selection are also created once. Every ordinary question and every safely
+resolved follow-up executes a newly identified plan against the complete local
+index.
+
+```text
+current question + bounded previous reference
+                    ↓
+       deterministic local resolver
+          ↙                    ↘
+fresh typed plan          clarification plan
+          ↓                    ↓
+complete local query       local response
+          ↓                    (zero model calls)
+current result + minimal referent context
+          ↓
+immutable request preparation → preview → per-turn cloud authorization
+```
+
+`ConversationState` is immutable and holds at most one `ConversationTurn`.
+That turn contains the previous plan, a hash-derived result ID, at most 100
+fact IDs, at most 100 record IDs, an optional unambiguous record ID, and active
+platform/category/date/facet scope. It does not contain a model answer, raw
+archive values, or a transcript. `:reset` drops the turn. Changing `:timezone`
+also drops it so a date referent cannot silently cross timezone assumptions.
+
+The resolver recognizes only explicit forms such as “on that day,” “which of
+those were most common?”, “compare that with Google,” “did that record include
+media?”, and “show me the previous result again.” A singular record or platform
+referent is resolved only when the prior result identifies exactly one. An
+ambiguous form becomes a fresh local clarification plan and never reaches a
+model.
+
 ## Ephemeral state
 
 Each process creates a random, user-only temporary directory carrying a marker.
@@ -58,3 +95,7 @@ and remove it. Abrupt termination, including `SIGKILL` or an unhandled
 `SIGTERM`, can leave the marked session directory behind. On a later startup,
 the CLI removes marked sessions older than 24 hours. See `PRIVACY.md` for the
 limits of best-effort deletion.
+
+Conversation state exists only in process memory. It is discarded with the
+session on normal exit, `:exit`, EOF, handled cancellation, and exception
+unwinding.

@@ -36,6 +36,19 @@ deterministic local no-match answer and makes no model request. Counts and other
 derived facts describe one person's export and must themselves be treated as
 personal data.
 
+Conversational Q&A validates and indexes the explicitly selected sources once,
+then reuses that ephemeral local index. Every turn compiles and executes a new
+deterministic query over the complete applicable scope. A follow-up is never
+answered from a previous model response or previous bounded evidence selection.
+Clarifications and no-match results that can be stated locally make zero model
+calls.
+
+In-memory conversation state is bounded to one previous typed plan, one derived
+result ID, at most 100 fact IDs, at most 100 record IDs, active scope, timezone,
+and a locally proven unambiguous referent. It does not retain model responses or
+full transcripts and is never persisted. Changing the timezone clears prior
+referents. `:reset` clears them explicitly.
+
 Ollama is restricted to the local loopback interface and is the recommended
 provider. A validated OpenAI-compatible loopback endpoint is also local. Local
 models may receive calculated facts and selected normalized record values
@@ -52,6 +65,14 @@ calculated facts, and records may be personal data. Interactive use requires
 typing `SEND PERSONAL DATA` for that question; non-interactive use requires
 explicit provider selection and `--allow-cloud`.
 
+Interactive cloud chat always requires typed authorization for each
+transmitted turn; one-shot `--allow-cloud` does not carry into chat and consent
+is never cached. Its preview additionally lists the exact conversation-state
+fields included and the active timezone/scope assumptions. Local deterministic
+follow-up resolution happens before authorization, but it makes no model,
+planning, classification, summarization, or embedding request. The exact
+previewed immutable bytes are the bytes passed to the adapter after consent.
+
 No model, embedding, classification, or planning request occurs before that
 authorization. Authorization is never reused for another question. The exact
 previewed request-body bytes are transmitted without rebuilding them. Cloud
@@ -65,6 +86,10 @@ promise is therefore **local by default with explicit per-question cloud
 disclosure**, not anonymity and not a claim that cloud models never receive
 personal information. Centaur communicates directly with the selected provider
 and does not receive the key, prompt, response, or export.
+
+The conversational product boundary is: **An ephemeral local analysis session
+that re-queries the selected exports for each turn; local by default, with
+explicit per-turn cloud disclosure.**
 
 Centaur Data Lens has no analytics, crash reporter, automatic updater, or
 background service.

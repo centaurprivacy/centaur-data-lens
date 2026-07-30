@@ -13,6 +13,7 @@ import httpx
 from pydantic import ValidationError
 
 from centaur_data_lens.analysis import AnalysisSession
+from centaur_data_lens.conversation import ResolvedContext
 from centaur_data_lens.errors import ModelAdapterError
 from centaur_data_lens.models import (
     AIAnswer,
@@ -106,6 +107,9 @@ class TransmissionPreview:
     transmitted_fields: tuple[str, ...]
     sensitivity_classes: tuple[str, ...]
     will_transmit: bool
+    conversation_state_fields: tuple[str, ...] = ()
+    timezone_assumption: str | None = None
+    scope_assumptions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -578,6 +582,9 @@ def prepare_question(
     source: QueryResult,
     question_or_adapter: ModelAdapter,
     adapter: None = None,
+    *,
+    conversation_context: ResolvedContext | None = None,
+    include_query_plan: bool = False,
 ) -> PreparedQuestion: ...
 
 
@@ -586,6 +593,9 @@ def prepare_question(
     source: AnalysisSession,
     question_or_adapter: str,
     adapter: ModelAdapter,
+    *,
+    conversation_context: ResolvedContext | None = None,
+    include_query_plan: bool = False,
 ) -> PreparedQuestion: ...
 
 
@@ -593,23 +603,39 @@ def prepare_question(
     source: AnalysisSession | QueryResult,
     question_or_adapter: str | ModelAdapter,
     adapter: ModelAdapter | None = None,
+    *,
+    conversation_context: ResolvedContext | None = None,
+    include_query_plan: bool = False,
 ) -> PreparedQuestion:
     """Prepare an explicit QueryResult, with a legacy session/question wrapper."""
 
     if isinstance(source, QueryResult):
         if adapter is not None or isinstance(question_or_adapter, str):
             raise TypeError("QueryResult preparation accepts exactly one model adapter.")
-        return _prepare_query_result(source, question_or_adapter)
+        return _prepare_query_result(
+            source,
+            question_or_adapter,
+            conversation_context=conversation_context,
+            include_query_plan=include_query_plan,
+        )
     if adapter is None or not isinstance(question_or_adapter, str):
         raise TypeError("Session preparation requires a question and model adapter.")
     if len(question_or_adapter.encode()) > _MAX_REQUEST_BYTES:
         raise ModelAdapterError("The question exceeds the safe request size limit.")
-    return _prepare_query_result(source.query(question_or_adapter), adapter)
+    return _prepare_query_result(
+        source.query(question_or_adapter),
+        adapter,
+        conversation_context=conversation_context,
+        include_query_plan=include_query_plan,
+    )
 
 
 def _prepare_query_result(
     result: QueryResult,
     adapter: ModelAdapter,
+    *,
+    conversation_context: ResolvedContext | None = None,
+    include_query_plan: bool = False,
 ) -> PreparedQuestion:
     question = result.plan.question
     if len(question.encode()) > _MAX_REQUEST_BYTES:
@@ -625,21 +651,41 @@ def _prepare_query_result(
         "query_status": result.status.value,
     }
     transmittable_facts = tuple(fact for fact in result.facts if fact.transmittable)
+    query_plan = {
+        "plan_id": result.plan.plan_id,
+        "intent": result.plan.intent.value,
+        "operation": result.plan.operation.value,
+        "scope": result.plan.scope.model_dump(mode="json"),
+    }
+    contextual_value = (
+        conversation_context.model_dump(mode="json") if conversation_context is not None else None
+    )
+    contextual_fields = (
+        tuple(f"conversation_context.{field}" for field in contextual_value)
+        if contextual_value is not None
+        else ()
+    )
+    scope_assumptions = tuple(assumption.message for assumption in result.assumptions)
 
     def serialize(
         facts: list[CalculatedFact],
         records: list[NormalizedRecord],
     ) -> tuple[str, bytes]:
+        context: dict[str, object] = {
+            "question": question,
+            "scope": scope,
+            "assumptions": [
+                assumption.model_dump(mode="json") for assumption in result.assumptions
+            ],
+            "calculated_facts": [_fact_context(fact) for fact in facts],
+            "evidence_records": [_record_context(record) for record in records],
+        }
+        if include_query_plan:
+            context["query_plan"] = query_plan
+        if contextual_value is not None:
+            context["conversation_context"] = contextual_value
         rendered = json.dumps(
-            {
-                "question": question,
-                "scope": scope,
-                "assumptions": [
-                    assumption.model_dump(mode="json") for assumption in result.assumptions
-                ],
-                "calculated_facts": [_fact_context(fact) for fact in facts],
-                "evidence_records": [_record_context(record) for record in records],
-            },
+            context,
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -664,16 +710,17 @@ def _prepare_query_result(
             (fact for fact in transmittable_facts if fact.scope == "matching"),
             transmittable_facts[0],
         )
+        context = {
+            "question": question,
+            "scope": scope,
+            "assumptions": [
+                assumption.model_dump(mode="json") for assumption in result.assumptions
+            ],
+            "calculated_facts": [_fact_context(no_match_fact)],
+            "evidence_records": [],
+        }
         payload = json.dumps(
-            {
-                "question": question,
-                "scope": scope,
-                "assumptions": [
-                    assumption.model_dump(mode="json") for assumption in result.assumptions
-                ],
-                "calculated_facts": [_fact_context(no_match_fact)],
-                "evidence_records": [],
-            },
+            context,
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -707,6 +754,9 @@ def _prepare_query_result(
                 transmitted_fields=(),
                 sensitivity_classes=(),
                 will_transmit=False,
+                conversation_state_fields=(),
+                timezone_assumption=result.plan.scope.timezone,
+                scope_assumptions=scope_assumptions,
             ),
             payload=payload,
             request_body=b"",
@@ -766,8 +816,18 @@ def _prepare_query_result(
         "request.structured_output_schema",
         "request.system_prompt",
     }
+    if include_query_plan:
+        transmitted_fields.update(
+            {
+                "query_plan.plan_id",
+                "query_plan.intent",
+                "query_plan.operation",
+                "query_plan.scope",
+            }
+        )
     for item in (_record_context(record) for record in included_records):
         transmitted_fields.update(f"evidence_records.{key}" for key in item)
+    transmitted_fields.update(contextual_fields)
     sensitivity_classes = _fact_sensitivity_classes(included_facts) | {
         sensitivity for record in included_records for sensitivity in record.sensitivity_tags
     }
@@ -786,6 +846,9 @@ def _prepare_query_result(
         transmitted_fields=tuple(sorted(transmitted_fields)),
         sensitivity_classes=tuple(sorted(sensitivity_classes)),
         will_transmit=True,
+        conversation_state_fields=contextual_fields,
+        timezone_assumption=result.plan.scope.timezone,
+        scope_assumptions=scope_assumptions,
     )
     return PreparedQuestion(
         preview=preview,

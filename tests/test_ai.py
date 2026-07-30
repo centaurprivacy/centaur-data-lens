@@ -168,6 +168,8 @@ def test_context_is_bounded_and_preview_is_explicit(google_export: Path) -> None
     assert "privacy tools" in payload
     decoded = json.loads(payload)
     assert decoded["scope"]["total_records"] == 5
+    assert "query_plan" not in decoded
+    assert "conversation_context" not in decoded
     assert decoded["scope"]["matching_records"] == 1
     assert decoded["calculated_facts"]
     assert decoded["evidence_records"]

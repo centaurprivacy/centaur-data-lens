@@ -332,6 +332,27 @@ def _plan(
     )
 
 
+def build_query_plan(
+    *,
+    question: str,
+    intent: QueryIntent,
+    operation: QueryOperation,
+    scope: QueryScope | None = None,
+    assumptions: tuple[QueryAssumption, ...] = (),
+    clarification: str | None = None,
+) -> QueryPlan:
+    """Build a validated deterministic plan for trusted local orchestration."""
+
+    return _plan(
+        question=" ".join(question.strip().split()),
+        intent=intent,
+        operation=operation,
+        scope=scope,
+        assumptions=assumptions,
+        clarification=clarification,
+    )
+
+
 def compile_query(question: str, *, timezone: str | tzinfo | None = None) -> QueryPlan:
     """Compile allowlisted common question forms without a model or network call."""
 
