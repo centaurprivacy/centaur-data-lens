@@ -74,6 +74,28 @@ def test_facet_follow_up_and_previous_result_are_fresh(google_export) -> None:
     assert previous.plan.plan_id != most_common.plan.plan_id
 
 
+def test_interpretive_follow_up_requeries_previous_scope(google_export) -> None:
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        first = resolve_turn("which services were present?", ConversationState())
+        state = ConversationState().after(session.execute_query(first.plan))
+        interpretation = resolve_turn("what does this mean?", state)
+        result = session.execute_query(interpretation.plan)
+
+    assert interpretation.plan.operation == QueryOperation.FACET_COUNTS
+    assert interpretation.plan.scope == first.plan.scope
+    assert interpretation.plan.plan_id != first.plan.plan_id
+    assert interpretation.context is not None
+    assert interpretation.context.referent_kind == "previous_result"
+    assert result.status == QueryStatus.OK
+
+
+def test_interpretive_question_without_prior_result_uses_archive_overview() -> None:
+    resolved = resolve_turn("what does this mean?", ConversationState())
+    assert resolved.plan.intent == QueryIntent.ARCHIVE_OVERVIEW
+    assert resolved.plan.operation == QueryOperation.ARCHIVE_OVERVIEW
+
+
 def test_ambiguous_referents_create_local_clarification_plans() -> None:
     for question in (
         "what was on that day?",
@@ -97,11 +119,16 @@ def test_state_is_bounded_and_reset_preserves_timezone(google_export) -> None:
             state = state.after(result)
 
     assert state.turn_count == 160
+    assert len(state.turns) == 8
     assert state.previous_turn is not None
     assert len(state.previous_turn.result.fact_ids) <= 100
     assert len(state.previous_turn.result.record_ids) <= 100
-    assert "summarize this export" not in state.model_dump_json()
+    model_context = state.model_context(None)
+    assert model_context is not None
+    assert len(model_context.recent_turns) == 8
+    assert model_context.resolved_referent is None
     reset = state.reset()
+    assert reset.turns == ()
     assert reset.previous_turn is None
     assert reset.timezone == "UTC"
 
@@ -221,7 +248,7 @@ def test_prepared_follow_up_contains_only_minimal_context_and_frozen_bytes(
         prepared = prepare_question(
             result,
             adapter,
-            conversation_context=follow_up.context,
+            conversation_context=state.model_context(follow_up.context),
             include_query_plan=True,
         )
         previewed_bytes = prepared.request_body
@@ -231,10 +258,13 @@ def test_prepared_follow_up_contains_only_minimal_context_and_frozen_bytes(
     assert adapter.sent == [previewed_bytes]
     assert len(previewed_bytes) == prepared.preview.payload_bytes
     assert set(payload["conversation_context"]) == {
-        "previous_result_id",
-        "referent_kind",
-        "referent_value",
+        "recent_turns",
+        "resolved_referent",
     }
+    assert payload["conversation_context"]["recent_turns"][0]["question"] == (
+        "what happened on March 31, 2025?"
+    )
+    assert payload["conversation_context"]["resolved_referent"]["referent_kind"] == ("record")
     assert payload["query_plan"]["scope"]["record_ids"]
     assert "summarize this export" not in prepared.payload
     assert str(google_export) not in prepared.payload
@@ -244,9 +274,15 @@ def test_prepared_follow_up_contains_only_minimal_context_and_frozen_bytes(
     assert "API_KEY" not in prepared.payload
     assert "source" not in prepared.preview.conversation_state_fields
     assert prepared.preview.conversation_state_fields == (
-        "conversation_context.previous_result_id",
-        "conversation_context.referent_kind",
-        "conversation_context.referent_value",
+        "conversation_context.recent_turns.question",
+        "conversation_context.recent_turns.plan_id",
+        "conversation_context.recent_turns.result_id",
+        "conversation_context.recent_turns.intent",
+        "conversation_context.recent_turns.operation",
+        "conversation_context.recent_turns.scope",
+        "conversation_context.resolved_referent.previous_result_id",
+        "conversation_context.resolved_referent.referent_kind",
+        "conversation_context.resolved_referent.referent_value",
     )
 
 

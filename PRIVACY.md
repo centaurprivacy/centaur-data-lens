@@ -43,11 +43,12 @@ answered from a previous model response or previous bounded evidence selection.
 Clarifications and no-match results that can be stated locally make zero model
 calls.
 
-In-memory conversation state is bounded to one previous typed plan, one derived
-result ID, at most 100 fact IDs, at most 100 record IDs, active scope, timezone,
-and a locally proven unambiguous referent. It does not retain model responses or
-full transcripts and is never persisted. Changing the timezone clears prior
-referents. `:reset` clears them explicitly.
+In-memory conversation state is bounded to eight recent typed plans and their
+derived result IDs, at most 100 fact IDs and 100 record IDs per turn, active
+scope, timezone, and locally proven unambiguous referents. The typed plans retain
+their user questions. It does not retain model responses, raw archive values, or
+a full transcript and is never persisted. Changing the timezone clears all prior
+turns. `:reset` clears them explicitly.
 
 Ollama is restricted to the local loopback interface and is the recommended
 provider. A validated OpenAI-compatible loopback endpoint is also local. Local
@@ -72,6 +73,9 @@ fields included and the active timezone/scope assumptions. Local deterministic
 follow-up resolution happens before authorization, but it makes no model,
 planning, classification, summarization, or embedding request. The exact
 previewed immutable bytes are the bytes passed to the adapter after consent.
+The disclosed conversation fields can include up to eight recent user questions
+and their typed plan/result metadata, but never prior evidence records or model
+responses.
 
 No model, embedding, classification, or planning request occurs before that
 authorization. Authorization is never reused for another question. The exact

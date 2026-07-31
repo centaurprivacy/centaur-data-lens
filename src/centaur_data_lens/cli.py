@@ -208,14 +208,20 @@ def _print_preview(preview: TransmissionPreview) -> None:
 
 def _print_answer(answer: AIAnswer) -> None:
     console.print()
-    for claim in answer.claims:
+    for index, claim in enumerate(answer.claims):
+        _safe_print(claim.text, limit=4_000)
         references: list[str] = []
         if claim.fact_ids:
             references.append(f"facts: {', '.join(claim.fact_ids)}")
         if claim.record_ids:
             references.append(f"records: {', '.join(claim.record_ids)}")
-        _safe_print(f"[{claim.kind.value}] {'; '.join(references)}", style="bold", limit=8_000)
-        _safe_print(claim.text, limit=4_000)
+        _safe_print(
+            f"Evidence ({claim.kind.value}) — {'; '.join(references)}",
+            style="dim",
+            limit=8_000,
+        )
+        if index < len(answer.claims) - 1:
+            console.print()
 
 
 def _print_query_context(result: QueryResult) -> None:
@@ -278,8 +284,8 @@ def _print_chat_help() -> None:
         (":help", "Show this command list."),
         (":coverage", "Show selected-export coverage and omissions."),
         (":scope", "Show the active deterministic follow-up scope."),
-        (":timezone [ZONE]", "Show or set the IANA timezone; setting it resets referents."),
-        (":reset", "Forget the previous plan and result reference."),
+        (":timezone [ZONE]", "Show or set the IANA timezone; setting it resets chat context."),
+        (":reset", "Forget all retained turn context."),
         (":exit", "Exit and delete the temporary analysis."),
     ):
         _safe_print(f"  {command:<20} {description}")
@@ -325,10 +331,10 @@ def _handle_chat_command(
             except ValueError as exc:
                 _safe_print(str(exc), style="red")
             else:
-                _safe_print(f"Timezone set to {timezone}; previous referents were reset.")
+                _safe_print(f"Timezone set to {timezone}; retained chat context was reset.")
     elif normalized == ":reset":
         state = state.reset()
-        _safe_print("Conversation referents reset.")
+        _safe_print("Retained chat context reset.")
     elif normalized == ":exit":
         return state, False
     else:
@@ -348,7 +354,7 @@ def _chat_turn(
     prepared = prepare_question(
         result,
         adapter,
-        conversation_context=resolved.context,
+        conversation_context=state.model_context(resolved.context),
         include_query_plan=True,
     )
     _print_preview(prepared.preview)

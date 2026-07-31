@@ -126,7 +126,9 @@ def test_question_context_handles_broad_and_no_match_questions() -> None:
         summary = session.question_context("summarize this export")
         privacy_related = session.question_context("privacy-related activity")
         incompatible = session.question_context("privacy video")
-        late_meaningful_term = session.question_context(" ".join(["what"] * 25 + ["privacy"]))
+        late_meaningful_term = session.question_context(
+            "find records about " + " ".join(["what"] * 25 + ["privacy"])
+        )
         missing = session.question_context("quantum zebras")
         repeated = session.question_context("quantum zebras")
         different = session.question_context("privacy")

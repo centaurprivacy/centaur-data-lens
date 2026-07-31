@@ -41,8 +41,9 @@ otherwise it executes a local clarification plan. Every resolved follow-up
 re-queries the ephemeral index. Models cannot select a referent, reuse an old
 evidence window, or access a transcript.
 
-Conversation state is restricted to one previous plan, bounded IDs, active
-scope, timezone, and unambiguous referents. It is held in memory only. Cloud
+Conversation state is restricted to eight recent typed plans, bounded IDs,
+active scopes, timezone, and unambiguous referents. It is held in memory only
+and excludes prior model responses and evidence values. Cloud
 chat previews the complete immutable request body and requires typed consent
 again before each adapter completion call. Denial, EOF, Ctrl-C, local
 clarification, and no-match paths do not invoke the provider.

@@ -38,6 +38,16 @@ _DATE_RE = re.compile(
 )
 _ISO_DATE_RE = re.compile(r"\b(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})\b")
 _RECORD_ID_RE = re.compile(r"\b[0-9a-f]{24}\b", re.IGNORECASE)
+_TEXT_LOOKUP_RE = re.compile(
+    r"\b(?:find|look for|search for|show (?:me )?(?:records?|items?) (?:about|containing|"
+    r"matching)|(?:records?|items?) (?:about|containing|matching|mention(?:ing|s)?)|"
+    r"mentions? of)\b",
+    re.IGNORECASE,
+)
+_OPEN_ENDED_QUESTION_RE = re.compile(
+    r"^(?:what|why|how|is|are|do|does|did|can|could|should|would|tell|explain|describe)\b",
+    re.IGNORECASE,
+)
 _MAX_TEXT_TERMS = 20
 _MAX_RECORD_IDS = 100
 _GENERIC_PRODUCTS = frozenset({"takeout", "your_facebook_activity"})
@@ -405,7 +415,18 @@ def compile_query(question: str, *, timezone: str | tzinfo | None = None) -> Que
             clarification="Provide a valid calendar date, including a four-digit year.",
         )
 
-    if any(phrase in lowered for phrase in ("over time", "trend", "change over")):
+    if any(
+        phrase in lowered
+        for phrase in (
+            "over time",
+            "change over",
+            "by month",
+            "month by month",
+            "timeline",
+            "temporal trend",
+            "time trend",
+        )
+    ):
         return _plan(
             question=normalized,
             intent=QueryIntent.TREND,
@@ -464,7 +485,50 @@ def compile_query(question: str, *, timezone: str | tzinfo | None = None) -> Que
                 scope=QueryScope(facet=facet),
             )
 
-    if any(phrase in lowered for phrase in ("summarize", "summarise", "overview", "summary")):
+    if any(
+        phrase in lowered
+        for phrase in (
+            "summarize",
+            "summarise",
+            "overview",
+            "summary",
+            "how many records",
+            "number of records",
+            "record count",
+            "how much data",
+            "show me data",
+            "tell me about my data",
+            "what is here",
+            "some trends",
+            "any trends",
+            "interesting trends",
+            "notable trends",
+            "some patterns",
+            "any patterns",
+            "interesting patterns",
+            "notable patterns",
+        )
+    ):
+        return _plan(
+            question=normalized,
+            intent=QueryIntent.ARCHIVE_OVERVIEW,
+            operation=QueryOperation.ARCHIVE_OVERVIEW,
+        )
+
+    if any(
+        phrase in lowered
+        for phrase in (
+            "what does this mean",
+            "what does this data mean",
+            "what should i know",
+            "what should i be concerned about",
+            "should i be concerned",
+            "what does this data say about me",
+            "explain this export",
+            "privacy implications",
+            "privacy risks",
+        )
+    ):
         return _plan(
             question=normalized,
             intent=QueryIntent.ARCHIVE_OVERVIEW,
@@ -482,7 +546,7 @@ def compile_query(question: str, *, timezone: str | tzinfo | None = None) -> Que
             ),
         )
 
-    if lowered in {"show me data", "tell me about my data", "help", "what is here"}:
+    if lowered == "help":
         return _plan(
             question=normalized,
             intent=QueryIntent.CLARIFICATION,
@@ -505,27 +569,19 @@ def compile_query(question: str, *, timezone: str | tzinfo | None = None) -> Que
             ),
         )
     terms = _text_terms(normalized)
-    if terms:
+    if terms and (
+        _TEXT_LOOKUP_RE.search(normalized) or not _OPEN_ENDED_QUESTION_RE.search(normalized)
+    ):
         return _plan(
             question=normalized,
             intent=QueryIntent.FULL_TEXT,
             operation=QueryOperation.FULL_TEXT_MATCH,
             scope=QueryScope(text_terms=terms),
         )
-    if lowered in {"what happened?", "what happened", "what might this mean?"}:
-        return _plan(
-            question=normalized,
-            intent=QueryIntent.ARCHIVE_OVERVIEW,
-            operation=QueryOperation.ARCHIVE_OVERVIEW,
-        )
     return _plan(
         question=normalized,
-        intent=QueryIntent.UNSUPPORTED,
-        operation=QueryOperation.COVERAGE_ONLY,
-        clarification=(
-            "This local compiler does not support that question form. Try an overview, date, "
-            "facet, trend, platform comparison, text lookup, or explicit record ID."
-        ),
+        intent=QueryIntent.ARCHIVE_OVERVIEW,
+        operation=QueryOperation.ARCHIVE_OVERVIEW,
     )
 
 

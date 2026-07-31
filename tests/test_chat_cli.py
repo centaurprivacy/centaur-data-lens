@@ -79,6 +79,7 @@ def test_chat_indexes_once_and_executes_a_fresh_plan_per_question(
             "summarize this export",
             "what happened on March 31, 2025?",
             "did that record include media?",
+            "what does this mean?",
             ":exit",
         ]
     )
@@ -115,9 +116,20 @@ def test_chat_indexes_once_and_executes_a_fresh_plan_per_question(
 
     assert result.exit_code == 0, result.output
     assert index_calls == 1
-    assert len(query_plans) == 3
-    assert len(set(query_plans)) == 3
-    assert len(adapter.calls) == 3
+    assert len(query_plans) == 4
+    assert len(set(query_plans)) == 4
+    assert len(adapter.calls) == 4
+    final_payload = json.loads(adapter.calls[-1])
+    recent_turns = final_payload["conversation_context"]["recent_turns"]
+    assert [turn["question"] for turn in recent_turns] == [
+        "summarize this export",
+        "what happened on March 31, 2025?",
+        "did that record include media?",
+    ]
+    assert (
+        final_payload["conversation_context"]["resolved_referent"]["referent_kind"]
+        == "previous_result"
+    )
     assert "records:" in result.stdout
     assert (
         "Timezone disclosure: assuming America/Los_Angeles; UTC boundary checked" in result.stdout

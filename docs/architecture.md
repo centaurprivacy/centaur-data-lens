@@ -59,34 +59,45 @@ resolved follow-up executes a newly identified plan against the complete local
 index.
 
 ```text
-current question + bounded previous reference
+current question + bounded recent typed context
                     ↓
-       deterministic local resolver
+ deterministic local resolver/compiler
           ↙                    ↘
 fresh typed plan          clarification plan
           ↓                    ↓
 complete local query       local response
           ↓                    (zero model calls)
-current result + minimal referent context
+current result + bounded structured context
           ↓
 immutable request preparation → preview → per-turn cloud authorization
 ```
 
-`ConversationState` is immutable and holds at most one `ConversationTurn`.
-That turn contains the previous plan, a hash-derived result ID, at most 100
-fact IDs, at most 100 record IDs, an optional unambiguous record ID, and active
-platform/category/date/facet scope. It does not contain a model answer, raw
-archive values, or a transcript. The session retains the immediately previous
-question as part of its typed query plan. It does not retain older turns, model
-responses, or a full transcript. `:reset` drops the turn. Changing `:timezone`
-also drops it so a date referent cannot silently cross timezone assumptions.
+`ConversationState` is immutable and holds at most eight `ConversationTurn`
+objects. Each contains a typed plan, a hash-derived result ID, at most 100 fact
+IDs, at most 100 record IDs, an optional unambiguous record ID, and active
+platform/category/date/facet scope. Typed plans retain their user questions so
+later turns have bounded conversational context. The state does not contain a
+model answer, raw archive values, or a full transcript. `:reset` drops all turns.
+Changing `:timezone` also drops them so a date referent cannot silently cross
+timezone assumptions.
 
 The resolver recognizes only explicit forms such as “on that day,” “which of
 those were most common?”, “compare that with Google,” “did that record include
-media?”, and “show me the previous result again.” A singular record or platform
+media?”, “what does this mean?”, and “show me the previous result again.”
+Interpretive follow-ups re-run the prior typed scope before model explanation; a
+singular record or platform
 referent is resolved only when the prior result identifies exactly one. An
 ambiguous form becomes a fresh local clarification plan and never reaches a
 model.
+
+The compiler uses literal full-text matching only for explicit lookup wording.
+Unrecognized open-ended questions select the archive overview, allowing the
+model to answer conversationally from local aggregate facts and bounded current
+evidence instead of producing a misleading empty search result.
+
+Every model request includes at most eight prior structured turn summaries:
+question, plan/result IDs, intent, operation, and value-free active scope. It
+does not resend evidence from old results or any previous model response.
 
 ## Ephemeral state
 

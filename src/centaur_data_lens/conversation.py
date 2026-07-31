@@ -20,6 +20,8 @@ from centaur_data_lens.models import (
 from centaur_data_lens.query import build_query_plan, compile_query, date_from_question
 
 _MAX_REFERENCE_IDS = 100
+_MAX_CONTEXT_TURNS = 8
+_MAX_CONTEXT_QUESTION_CHARS = 1_000
 _FOLLOW_UP_PATTERNS = {
     "day": re.compile(r"\b(?:on )?that day\b", re.IGNORECASE),
     "facet": re.compile(
@@ -30,6 +32,20 @@ _FOLLOW_UP_PATTERNS = {
     "record": re.compile(r"\b(?:did|does) that record\b", re.IGNORECASE),
     "previous": re.compile(
         r"\b(?:show|display)(?: me)? the previous result again\b",
+        re.IGNORECASE,
+    ),
+    "interpretation": re.compile(
+        r"\b(?:"
+        r"what (?:does|did) (?:this|that|it) mean|"
+        r"(?:can you )?explain (?:this|that|it)|"
+        r"help me understand (?:this|that|it)|"
+        r"tell me more(?: about (?:this|that|it))?|"
+        r"why (?:does|is) (?:this|that|it) matter|"
+        r"what (?:can|should) i (?:learn|know|make) (?:from|of) (?:this|that|it)|"
+        r"should i be concerned(?: about (?:this|that|it))?|"
+        r"what(?:'s| is) the significance of (?:this|that|it)|"
+        r"summari[sz]e (?:this|that|it)"
+        r")\b",
         re.IGNORECASE,
     ),
 }
@@ -61,10 +77,10 @@ class ActiveScope(BaseModel):
 
 
 class ConversationTurn(BaseModel):
-    """The immediately previous typed query plan and bounded result reference.
+    """One recent typed query plan and bounded result reference.
 
-    The session retains the immediately previous question as part of its typed query plan.
-    It does not retain older turns, model responses, or a full transcript.
+    The session retains up to eight recent questions as part of their typed query plans.
+    It does not retain model responses, raw archive values, or a full transcript.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -79,19 +95,23 @@ class ConversationState(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    previous_turn: ConversationTurn | None = None
+    turns: tuple[ConversationTurn, ...] = Field(default=(), max_length=_MAX_CONTEXT_TURNS)
     timezone: str | None = None
     turn_count: int = Field(default=0, ge=0)
 
+    @property
+    def previous_turn(self) -> ConversationTurn | None:
+        return self.turns[-1] if self.turns else None
+
     def reset(self) -> ConversationState:
-        return self.model_copy(update={"previous_turn": None})
+        return self.model_copy(update={"turns": ()})
 
     def with_timezone(self, timezone: str) -> ConversationState:
         try:
             ZoneInfo(timezone)
         except ZoneInfoNotFoundError as exc:
             raise ValueError(f"Unknown timezone: {timezone}") from exc
-        return self.model_copy(update={"timezone": timezone, "previous_turn": None})
+        return self.model_copy(update={"timezone": timezone, "turns": ()})
 
     def after(self, result: QueryResult) -> ConversationState:
         if result.status != QueryStatus.OK:
@@ -107,15 +127,38 @@ class ConversationState(BaseModel):
             and result.plan.scope == previous.plan.scope
         ):
             scope = scope.model_copy(update={"local_date": previous.scope.local_date})
+        turn = ConversationTurn(
+            plan=result.plan,
+            result=reference,
+            scope=scope,
+        )
         return self.model_copy(
             update={
-                "previous_turn": ConversationTurn(
-                    plan=result.plan,
-                    result=reference,
-                    scope=scope,
-                ),
+                "turns": (*self.turns, turn)[-_MAX_CONTEXT_TURNS:],
                 "turn_count": self.turn_count + 1,
             }
+        )
+
+    def model_context(
+        self,
+        referent: ResolvedContext | None,
+    ) -> ModelConversationContext | None:
+        if not self.turns and referent is None:
+            return None
+        recent_turns = tuple(
+            RecentTurnContext(
+                question=turn.plan.question[:_MAX_CONTEXT_QUESTION_CHARS],
+                plan_id=turn.plan.plan_id,
+                result_id=turn.result.result_id,
+                intent=turn.plan.intent.value,
+                operation=turn.plan.operation.value,
+                scope=turn.scope,
+            )
+            for turn in self.turns
+        )
+        return ModelConversationContext(
+            recent_turns=recent_turns,
+            resolved_referent=referent,
         )
 
 
@@ -127,6 +170,31 @@ class ResolvedContext(BaseModel):
     previous_result_id: str
     referent_kind: Literal["day", "facet", "platform", "record", "previous_result"]
     referent_value: str
+
+
+class RecentTurnContext(BaseModel):
+    """Bounded typed context for one prior turn; never model-response text."""
+
+    model_config = ConfigDict(frozen=True)
+
+    question: str = Field(max_length=_MAX_CONTEXT_QUESTION_CHARS)
+    plan_id: str
+    result_id: str
+    intent: str
+    operation: str
+    scope: ActiveScope
+
+
+class ModelConversationContext(BaseModel):
+    """Recent structured turn context included in one model request."""
+
+    model_config = ConfigDict(frozen=True)
+
+    recent_turns: tuple[RecentTurnContext, ...] = Field(
+        default=(),
+        max_length=_MAX_CONTEXT_TURNS,
+    )
+    resolved_referent: ResolvedContext | None = None
 
 
 class ResolvedTurn(BaseModel):
@@ -301,6 +369,14 @@ def resolve_turn(question: str, state: ConversationState) -> ResolvedTurn:
     if _FOLLOW_UP_PATTERNS["previous"].search(normalized):
         if previous is None:
             return _clarification(normalized, "There is no previous result in this session.")
+        return _repeat_plan(
+            normalized,
+            previous,
+            kind="previous_result",
+            value=previous.result.result_id,
+        )
+
+    if _FOLLOW_UP_PATTERNS["interpretation"].search(normalized) and previous is not None:
         return _repeat_plan(
             normalized,
             previous,

@@ -13,7 +13,7 @@ without creating an account or uploading an archive to Centaur.
 - There is no telemetry and no Centaur account.
 - Temporary indexes are deleted when the process exits.
 - Conversational analysis runs a fresh deterministic local query for every
-  question and retains only one bounded prior result reference.
+  question and retains up to eight bounded structured turn references in memory.
 - Q&A uses local archive-wide calculations plus a bounded evidence set; Ollama
   on the local loopback interface is the recommended provider.
 - Cloud AI is an advanced option that uses your own API key and transmits
@@ -71,12 +71,20 @@ question—including a resolved follow-up—compiles and executes a new typed
 model response or a previous evidence sample. Use `:help`, `:coverage`, `:scope`,
 `:timezone [ZONE]`, `:reset`, and `:exit` inside the session.
 
-Conversation memory contains only the previous plan, a derived result ID,
-bounded valid fact/record IDs, active scope, timezone, and an unambiguous
-referent. The session retains the immediately previous question as part of its
-typed query plan. It does not retain older turns, model responses, or a full
-transcript. Conversation state is never written to disk, and archive values are
-not retained in it.
+Interpretive follow-ups such as “what does this mean?”, “tell me more,” and
+“should I be concerned?” re-run the immediately previous typed scope and ask the
+model to explain the fresh result. Natural aggregate questions such as “how many
+records are there?” and vague requests for “some trends” use an archive overview;
+only explicitly temporal wording requires timestamp coverage. Explicit lookup
+wording such as “find records about privacy” performs a text search; other
+open-ended questions use overview facts and bounded evidence instead of
+misinterpreting the whole sentence as search terms.
+
+Conversation memory contains up to eight recent typed plans, derived result IDs,
+bounded valid fact/record IDs, active scopes, timezone, and unambiguous referents.
+Those typed plans retain their user questions so later turns have useful context.
+The session does not retain model responses, raw archive values, or a full
+transcript. Conversation state is never written to disk.
 
 For non-interactive cloud use, the provider must be selected explicitly and
 `--allow-cloud` must be supplied for that one request. Cloud payloads can contain

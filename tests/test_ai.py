@@ -77,6 +77,8 @@ def assert_answer_schema(schema: object) -> None:
     assert isinstance(properties, dict)
     claims = properties["claims"]
     assert isinstance(claims, dict)
+    assert claims["minItems"] == 1
+    assert claims["maxItems"] == 8
     item = claims["items"]
     assert isinstance(item, dict)
     variant_properties = item["properties"]
@@ -153,6 +155,9 @@ def test_context_is_bounded_and_preview_is_explicit(google_export: Path) -> None
     request = json.loads(prepared.request_body)
     assert request["user"] == payload
     assert "untrusted data" in request["system"]
+    assert "conversational language" in request["system"]
+    assert "Do not emit one" in request["system"]
+    assert "claim per record" in request["system"]
     assert_answer_schema(request["schema"])
     rendered_schema = json.dumps(request["schema"])
     assert all(fact_id not in rendered_schema for fact_id in prepared.valid_fact_ids)
@@ -278,6 +283,27 @@ def test_rejects_answer_without_validated_claims(google_export: Path) -> None:
             )
 
 
+def test_rejects_fragmented_answer_with_too_many_claims(google_export: Path) -> None:
+    adapter = FakeAdapter({"claims": []})
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        prepared = prepare_question(session, "summarize this export", adapter)
+        fact_id = next(iter(prepared.valid_fact_ids))
+        adapter.response = {
+            "claims": [
+                {
+                    "text": f"Fragment {index}",
+                    "kind": "calculated",
+                    "record_ids": [],
+                    "fact_ids": [fact_id],
+                }
+                for index in range(9)
+            ]
+        }
+        with pytest.raises(ModelAdapterError, match="invalid structured answer"):
+            answer_question(prepared, adapter=adapter, allow_cloud=True)
+
+
 def test_calculated_claim_requires_fact_evidence(google_export: Path) -> None:
     with AnalysisSession() as session:
         analyze_sources(session, [SourceSpec("google", google_export)])
@@ -336,7 +362,7 @@ def test_local_model_retries_one_invalid_citation_contract(google_export: Path) 
                 "claims": [
                     {
                         "text": "Corrected evidence type.",
-                        "kind": "inference",
+                        "kind": "observed",
                         "record_ids": [record_id],
                         "fact_ids": [],
                     }
@@ -345,7 +371,7 @@ def test_local_model_retries_one_invalid_citation_contract(google_export: Path) 
         ]
         answer = answer_question(prepared, adapter=adapter, allow_cloud=False)
     assert adapter.calls == 2
-    assert answer.claims[0].kind.value == "inference"
+    assert answer.claims[0].kind.value == "observed"
     assert adapter.answer_schema is not None
     properties = adapter.answer_schema["properties"]
     assert isinstance(properties, dict)
@@ -357,7 +383,7 @@ def test_local_model_retries_one_invalid_citation_contract(google_export: Path) 
     assert isinstance(claim_properties, dict)
     kind = claim_properties["kind"]
     assert isinstance(kind, dict)
-    assert kind["enum"] == ["inference"]
+    assert kind["enum"] == ["observed", "calculated", "inference"]
     record_ids = claim_properties["record_ids"]
     assert isinstance(record_ids, dict)
     record_items = record_ids["items"]
