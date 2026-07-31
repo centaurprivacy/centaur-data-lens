@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import date, datetime
 from hashlib import sha256
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -17,7 +17,7 @@ from centaur_data_lens.models import (
     QueryScope,
     QueryStatus,
 )
-from centaur_data_lens.query import build_query_plan, compile_query
+from centaur_data_lens.query import build_query_plan, compile_query, date_from_question
 
 _MAX_REFERENCE_IDS = 100
 _FOLLOW_UP_PATTERNS = {
@@ -55,12 +55,17 @@ class ActiveScope(BaseModel):
     categories: tuple[str, ...] = ()
     start_utc: datetime | None = None
     end_utc: datetime | None = None
+    local_date: date | None = None
     timezone: str | None = None
     facet: str | None = None
 
 
 class ConversationTurn(BaseModel):
-    """One prior plan and its bounded result reference; never a transcript."""
+    """The immediately previous typed query plan and bounded result reference.
+
+    The session retains the immediately previous question as part of its typed query plan.
+    It does not retain older turns, model responses, or a full transcript.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -93,6 +98,15 @@ class ConversationState(BaseModel):
             return self
         reference = _result_reference(result)
         scope = _active_scope(result)
+        previous = self.previous_turn
+        if (
+            scope.local_date is None
+            and previous is not None
+            and result.plan.operation == QueryOperation.DATE_RANGE
+            and previous.plan.operation == QueryOperation.DATE_RANGE
+            and result.plan.scope == previous.plan.scope
+        ):
+            scope = scope.model_copy(update={"local_date": previous.scope.local_date})
         return self.model_copy(
             update={
                 "previous_turn": ConversationTurn(
@@ -159,6 +173,11 @@ def _active_scope(result: QueryResult) -> ActiveScope:
         categories=plan_scope.categories or evidence_categories,
         start_utc=plan_scope.start_utc,
         end_utc=plan_scope.end_utc,
+        local_date=(
+            date_from_question(result.plan.question)
+            if result.plan.operation == QueryOperation.DATE_RANGE
+            else None
+        ),
         timezone=plan_scope.timezone,
         facet=plan_scope.facet.value if plan_scope.facet else None,
     )
@@ -212,12 +231,12 @@ def resolve_turn(question: str, state: ConversationState) -> ResolvedTurn:
                 '"That day" is ambiguous. Ask with an explicit calendar date first.',
             )
         timezone = previous.scope.timezone or "the selected timezone"
-        assert previous.scope.start_utc is not None
-        local_date = (
-            previous.scope.start_utc.astimezone(ZoneInfo(timezone)).date()
-            if previous.scope.timezone
-            else previous.scope.start_utc.date()
-        )
+        local_date = previous.scope.local_date
+        if local_date is None:
+            return _clarification(
+                normalized,
+                "The prior date cannot be resolved safely. Ask with an explicit calendar date.",
+            )
         value = f"{local_date.isoformat()} ({timezone})"
         return _repeat_plan(normalized, previous, kind="day", value=value)
 

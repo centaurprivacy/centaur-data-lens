@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 from centaur_data_lens.ai import answer_question, prepare_question
 from centaur_data_lens.analysis import AnalysisSession, SourceSpec, analyze_sources
@@ -117,6 +117,32 @@ def test_timezone_boundary_is_preserved_in_follow_up(google_export) -> None:
     assert first.plan.scope.start_utc == datetime(2025, 1, 1, 8, tzinfo=UTC)
     assert first.plan.scope.end_utc == datetime(2025, 1, 2, 8, tzinfo=UTC)
     assert follow_up.plan.scope == first.plan.scope
+
+
+def test_date_follow_up_retains_local_date_for_non_iana_timezone_label(
+    google_export,
+) -> None:
+    non_iana_timezone = timezone(timedelta(hours=-8), "Pacific Standard Time")
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        first_plan = session.compile_query(
+            "what happened on January 1, 2025?",
+            timezone=non_iana_timezone,
+        )
+        state = ConversationState().after(session.execute_query(first_plan))
+
+        first_follow_up = resolve_turn("what else happened on that day?", state)
+        state = state.after(session.execute_query(first_follow_up.plan))
+        second_follow_up = resolve_turn("show activities on that day", state)
+
+    assert first_plan.scope.timezone == "Pacific Standard Time"
+    assert state.previous_turn is not None
+    assert state.previous_turn.scope.local_date is not None
+    assert state.previous_turn.scope.local_date.isoformat() == "2025-01-01"
+    assert first_follow_up.context is not None
+    assert first_follow_up.context.referent_value == ("2025-01-01 (Pacific Standard Time)")
+    assert second_follow_up.plan.operation == QueryOperation.DATE_RANGE
+    assert second_follow_up.context is not None
 
 
 def test_changing_timezone_clears_stale_date_referent() -> None:

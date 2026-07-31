@@ -76,7 +76,9 @@ immutable request preparation → preview → per-turn cloud authorization
 That turn contains the previous plan, a hash-derived result ID, at most 100
 fact IDs, at most 100 record IDs, an optional unambiguous record ID, and active
 platform/category/date/facet scope. It does not contain a model answer, raw
-archive values, or a transcript. `:reset` drops the turn. Changing `:timezone`
+archive values, or a transcript. The session retains the immediately previous
+question as part of its typed query plan. It does not retain older turns, model
+responses, or a full transcript. `:reset` drops the turn. Changing `:timezone`
 also drops it so a date referent cannot silently cross timezone assumptions.
 
 The resolver recognizes only explicit forms such as “on that day,” “which of

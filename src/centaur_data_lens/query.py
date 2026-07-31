@@ -271,7 +271,9 @@ def _timezone_name(value: str | tzinfo | None) -> tuple[str, tzinfo]:
     return str(local), local
 
 
-def _date_from_question(question: str) -> date | None:
+def date_from_question(question: str) -> date | None:
+    """Extract the explicit calendar date accepted by the local compiler."""
+
     match = _DATE_RE.search(question)
     if match:
         raw = f"{match['month']} {match['day']} {match['year']}"
@@ -375,7 +377,7 @@ def compile_query(question: str, *, timezone: str | tzinfo | None = None) -> Que
             scope=QueryScope(record_ids=explicit_ids),
         )
 
-    requested_date = _date_from_question(normalized)
+    requested_date = date_from_question(normalized)
     if requested_date is not None:
         timezone_name, timezone_value = _timezone_name(timezone)
         local_start = datetime.combine(requested_date, time.min, tzinfo=timezone_value)

@@ -73,8 +73,10 @@ model response or a previous evidence sample. Use `:help`, `:coverage`, `:scope`
 
 Conversation memory contains only the previous plan, a derived result ID,
 bounded valid fact/record IDs, active scope, timezone, and an unambiguous
-referent. It is never written to disk, and complete prompts, model responses,
-archive values, and transcripts are not retained.
+referent. The session retains the immediately previous question as part of its
+typed query plan. It does not retain older turns, model responses, or a full
+transcript. Conversation state is never written to disk, and archive values are
+not retained in it.
 
 For non-interactive cloud use, the provider must be selected explicitly and
 `--allow-cloud` must be supplied for that one request. Cloud payloads can contain
