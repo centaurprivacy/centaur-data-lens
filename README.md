@@ -80,6 +80,15 @@ wording such as “find records about privacy” performs a text search; other
 open-ended questions use overview facts and bounded evidence instead of
 misinterpreting the whole sentence as search terms.
 
+Overview turns send exact aggregate and field-coverage facts plus at most 12
+illustrative current records. Answers must synthesize those facts into two to
+four conversational claims; catalog-like output is retried once for local
+models, then replaced by a deterministic cited summary if the model still
+ignores the contract. Interpretive follow-ups receive a distinct background
+explanation rather than a repeated list. Local chat shows one compact analysis
+line per turn; the detailed immutable transmission preview remains mandatory for
+every cloud-backed turn.
+
 Conversation memory contains up to eight recent typed plans, derived result IDs,
 bounded valid fact/record IDs, active scopes, timezone, and unambiguous referents.
 Those typed plans retain their user questions so later turns have useful context.

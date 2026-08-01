@@ -28,7 +28,7 @@ from centaur_data_lens.analysis import (
 )
 from centaur_data_lens.conversation import ConversationState, resolve_turn
 from centaur_data_lens.errors import DataLensError, ModelAdapterError
-from centaur_data_lens.models import AIAnswer, QueryResult
+from centaur_data_lens.models import AIAnswer, QueryResult, QueryStatus
 from centaur_data_lens.platforms import get_platform, list_platforms
 from centaur_data_lens.reports import write_report
 from centaur_data_lens.security import sanitize_terminal, secure_write_text
@@ -212,9 +212,9 @@ def _print_answer(answer: AIAnswer) -> None:
         _safe_print(claim.text, limit=4_000)
         references: list[str] = []
         if claim.fact_ids:
-            references.append(f"facts: {', '.join(claim.fact_ids)}")
+            references.append(_compact_citations("facts", claim.fact_ids))
         if claim.record_ids:
-            references.append(f"records: {', '.join(claim.record_ids)}")
+            references.append(_compact_citations("records", claim.record_ids))
         _safe_print(
             f"Evidence ({claim.kind.value}) — {'; '.join(references)}",
             style="dim",
@@ -224,8 +224,24 @@ def _print_answer(answer: AIAnswer) -> None:
             console.print()
 
 
+def _compact_citations(label: str, identifiers: list[str]) -> str:
+    visible = identifiers[:3]
+    suffix = f" (+{len(identifiers) - len(visible)} more)" if len(identifiers) > 3 else ""
+    return f"{label}: {', '.join(visible)}{suffix}"
+
+
+def _print_local_turn_summary(preview: TransmissionPreview) -> None:
+    _safe_print(
+        f"Local analysis: {preview.total_records:,} records; "
+        f"{preview.matching_records:,} matched; {preview.fact_count} facts; "
+        f"{preview.record_count} evidence examples.",
+        style="dim",
+    )
+
+
 def _print_query_context(result: QueryResult) -> None:
-    _safe_print(f"Result status: {result.status.value}", style="bold")
+    if result.status != QueryStatus.OK:
+        _safe_print(f"Result status: {result.status.value}", style="bold")
     scope = result.plan.scope
     if scope.timezone and scope.start_utc and scope.end_utc:
         _safe_print(
@@ -357,7 +373,10 @@ def _chat_turn(
         conversation_context=state.model_context(resolved.context),
         include_query_plan=True,
     )
-    _print_preview(prepared.preview)
+    if adapter.is_local:
+        _print_local_turn_summary(prepared.preview)
+    else:
+        _print_preview(prepared.preview)
     _print_query_context(result)
     confirmed = adapter.is_local or not prepared.preview.will_transmit
     if not confirmed:

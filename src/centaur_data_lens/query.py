@@ -41,7 +41,8 @@ _RECORD_ID_RE = re.compile(r"\b[0-9a-f]{24}\b", re.IGNORECASE)
 _TEXT_LOOKUP_RE = re.compile(
     r"\b(?:find|look for|search for|show (?:me )?(?:records?|items?) (?:about|containing|"
     r"matching)|(?:records?|items?) (?:about|containing|matching|mention(?:ing|s)?)|"
-    r"mentions? of)\b",
+    r"mentions? of)\b|"
+    r"\bwhat\b.{0,100}\b(?:searches?|records?|items?)\b.{0,40}\b(?:appear|match|mention)",
     re.IGNORECASE,
 )
 _OPEN_ENDED_QUESTION_RE = re.compile(
@@ -50,6 +51,14 @@ _OPEN_ENDED_QUESTION_RE = re.compile(
 )
 _MAX_TEXT_TERMS = 20
 _MAX_RECORD_IDS = 100
+_OVERVIEW_PROFILE_FIELDS = (
+    "activity_type",
+    "service",
+    "device",
+    "hostname",
+    "title",
+    "timestamp",
+)
 _GENERIC_PRODUCTS = frozenset({"takeout", "your_facebook_activity"})
 _TRANSMITTABLE_EXTENSIONS = frozenset(
     {".csv", ".html", ".jpeg", ".jpg", ".json", ".mp4", ".png", ".txt", ".xml", ".zip"}
@@ -926,9 +935,9 @@ def execute_query(
                 scope_definition="all_supported_records",
                 metric="record_count",
                 value=total,
-            ),
-            *_manifest_facts(plan, manifest),
+            )
         ]
+        manifest_facts = _manifest_facts(plan, manifest)
         rows = connection.execute(
             """
             SELECT platform, category, COUNT(*), MIN(timestamp), MAX(timestamp)
@@ -961,6 +970,40 @@ def execute_query(
                             dimensions=dimensions,
                         )
                     )
+        if total:
+            for field in _OVERVIEW_PROFILE_FIELDS:
+                present, distinct = connection.execute(
+                    f"SELECT COUNT({field}), COUNT(DISTINCT {field}) FROM records"  # noqa: S608
+                ).fetchone()
+                facts.extend(
+                    (
+                        _fact(
+                            plan=plan,
+                            scope="archive",
+                            scope_definition="all_supported_records",
+                            metric="value_present_count",
+                            value=int(present),
+                            dimensions={"field": field},
+                        ),
+                        _fact(
+                            plan=plan,
+                            scope="archive",
+                            scope_definition="all_supported_records",
+                            metric="value_missing_count",
+                            value=total - int(present),
+                            dimensions={"field": field},
+                        ),
+                        _fact(
+                            plan=plan,
+                            scope="archive",
+                            scope_definition="all_supported_records",
+                            metric="distinct_value_count",
+                            value=int(distinct),
+                            dimensions={"field": field},
+                        ),
+                    )
+                )
+        facts.extend(manifest_facts)
         candidates = _record_rows(connection, limit=candidate_limit)
         overview_notes: tuple[CoverageNote, ...] = ()
         status = QueryStatus.OK

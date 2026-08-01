@@ -369,7 +369,12 @@ def test_ask_once_prints_conversational_text_before_every_citation(
                     AIClaim(
                         text="x" * 3_000,
                         kind=AIClaimKind.INFERENCE,
-                        record_ids=["first-record"],
+                        record_ids=[
+                            "first-record",
+                            "second-supporting-record",
+                            "third-supporting-record",
+                            "fourth-supporting-record",
+                        ],
                     ),
                     AIClaim(
                         text="Second claim",
@@ -396,6 +401,8 @@ def test_ask_once_prints_conversational_text_before_every_citation(
     assert output.index("Second claim") < output.index("second-record")
     assert "Evidence (inference)" in output
     assert "Evidence (observed)" in output
+    assert "(+1 more)" in output
+    assert "fourth-supporting-record" not in output
 
 
 def test_select_paths_uses_explicit_platform(monkeypatch, google_export: Path) -> None:

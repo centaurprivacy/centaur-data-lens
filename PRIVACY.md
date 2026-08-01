@@ -55,6 +55,12 @@ provider. A validated OpenAI-compatible loopback endpoint is also local. Local
 models may receive calculated facts and selected normalized record values
 without cloud authorization.
 
+Model-facing calculated facts contain an opaque fact ID, archive/matching scope,
+and a deterministic plain-language meaning. Internal metric names, dimensions,
+and provenance fields remain local. Archive-overview requests include at most 12
+illustrative current records; this does not change the 100-ID bound used for
+in-memory deterministic result references.
+
 Bring-your-own-key cloud adapters are an advanced escape hatch. Before each
 cloud question, the CLI shows the provider, model, destination, exact request-body
 size, archive and matching counts, fact and evidence counts, categories,

@@ -42,16 +42,36 @@ class _LocalAdapter:
         payload = json.loads(request_body)
         fact_id = payload["calculated_facts"][0]["fact_id"]
         record_ids = [record["record_id"] for record in payload["evidence_records"][:1]]
+        claims = [
+            {
+                "text": "Synthetic cited answer.",
+                "kind": "calculated",
+                "record_ids": record_ids,
+                "fact_ids": [fact_id],
+            }
+        ]
+        if payload["scope"]["selection_mode"] == "archive_overview":
+            category = payload["evidence_records"][0]["category"].replace("_", " ")
+            claims.append(
+                {
+                    "text": f"Synthetic {category} overview with timestamp context.",
+                    "kind": "calculated",
+                    "record_ids": [],
+                    "fact_ids": [fact_id],
+                }
+            )
+        if "what does" in payload["question"].lower():
+            claims.append(
+                {
+                    "text": "Synthetic interpretation.",
+                    "kind": "inference",
+                    "record_ids": [],
+                    "fact_ids": [fact_id],
+                }
+            )
         return json.dumps(
             {
-                "claims": [
-                    {
-                        "text": "Synthetic cited answer.",
-                        "kind": "calculated",
-                        "record_ids": record_ids,
-                        "fact_ids": [fact_id],
-                    }
-                ]
+                "claims": claims,
             }
         )
 
@@ -130,7 +150,10 @@ def test_chat_indexes_once_and_executes_a_fresh_plan_per_question(
         final_payload["conversation_context"]["resolved_referent"]["referent_kind"]
         == "previous_result"
     )
-    assert "records:" in result.stdout
+    assert "Evidence (" in result.stdout
+    assert "facts:" in result.stdout
+    assert "Local analysis:" in result.stdout
+    assert "Transmission preview" not in result.stdout
     assert (
         "Timezone disclosure: assuming America/Los_Angeles; UTC boundary checked" in result.stdout
     )

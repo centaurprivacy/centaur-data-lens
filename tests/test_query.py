@@ -260,6 +260,18 @@ def test_vague_patterns_use_overview_but_explicit_time_trends_require_timestamps
     )
     assert patterns.status == QueryStatus.OK
     assert patterns.plan.operation == QueryOperation.ARCHIVE_OVERVIEW
+    assert any(
+        fact.metric == "value_missing_count"
+        and fact.dimensions == {"field": "timestamp"}
+        and fact.value == 1
+        for fact in patterns.facts
+    )
+    assert any(
+        fact.metric == "distinct_value_count"
+        and fact.dimensions == {"field": "title"}
+        and fact.value == 1
+        for fact in patterns.facts
+    )
     assert temporal.status == QueryStatus.MATCHING_DATA_ABSENT
     assert temporal.plan.operation == QueryOperation.TIME_BUCKETS
 

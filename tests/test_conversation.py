@@ -90,6 +90,23 @@ def test_interpretive_follow_up_requeries_previous_scope(google_export) -> None:
     assert result.status == QueryStatus.OK
 
 
+def test_contextual_background_request_requeries_previous_scope(google_export) -> None:
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        first = resolve_turn("summarize this export", ConversationState())
+        state = ConversationState().after(session.execute_query(first.plan))
+        background = resolve_turn(
+            "give me some background on what you're showing me",
+            state,
+        )
+
+    assert background.plan.operation == QueryOperation.ARCHIVE_OVERVIEW
+    assert background.plan.scope == first.plan.scope
+    assert background.plan.plan_id != first.plan.plan_id
+    assert background.context is not None
+    assert background.context.referent_kind == "previous_result"
+
+
 def test_interpretive_question_without_prior_result_uses_archive_overview() -> None:
     resolved = resolve_turn("what does this mean?", ConversationState())
     assert resolved.plan.intent == QueryIntent.ARCHIVE_OVERVIEW

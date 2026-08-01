@@ -99,6 +99,17 @@ Every model request includes at most eight prior structured turn summaries:
 question, plan/result IDs, intent, operation, and value-free active scope. It
 does not resend evidence from old results or any previous model response.
 
+Archive overviews prioritize deterministic profile facts—record/category
+counts, distinct-value counts, and present/missing field coverage—and limit raw
+illustrations to 12 current records. The model receives each calculated fact as
+an opaque citation ID, scope, and plain-language meaning rather than internal
+metric/schema fields. Overview answers must lead with an aggregate, identify the
+represented category, disclose relevant time-coverage limits, and contain no
+more than four claims. Invalid local output gets one corrective retry; a second
+failure returns a locally constructed, citation-valid summary. Interpretive
+follow-ups have a separate recovery form explaining what records represent and
+what cannot safely be inferred.
+
 ## Ephemeral state
 
 Each process creates a random, user-only temporary directory carrying a marker.

@@ -170,6 +170,7 @@ def test_context_is_bounded_and_preview_is_explicit(google_export: Path) -> None
     assert preview.will_transmit
     assert "request.system_prompt" in preview.transmitted_fields
     assert "request.structured_output_schema" in preview.transmitted_fields
+    assert "calculated_facts.meaning" in preview.transmitted_fields
     assert "privacy tools" in payload
     decoded = json.loads(payload)
     assert decoded["scope"]["total_records"] == 5
@@ -177,6 +178,7 @@ def test_context_is_bounded_and_preview_is_explicit(google_export: Path) -> None
     assert "conversation_context" not in decoded
     assert decoded["scope"]["matching_records"] == 1
     assert decoded["calculated_facts"]
+    assert all("meaning" in fact for fact in decoded["calculated_facts"])
     assert decoded["evidence_records"]
     assert "source_references" not in payload
     assert "source_ids" not in payload
@@ -302,6 +304,87 @@ def test_rejects_fragmented_answer_with_too_many_claims(google_export: Path) -> 
         }
         with pytest.raises(ModelAdapterError, match="invalid structured answer"):
             answer_question(prepared, adapter=adapter, allow_cloud=True)
+
+
+def test_overview_payload_limits_examples_and_requires_aggregate_synthesis() -> None:
+    class LocalSequenceAdapter(FakeAdapter):
+        destination = "http://127.0.0.1:11434"
+        is_local = True
+
+        def __init__(self) -> None:
+            super().__init__({"claims": []})
+            self.responses: list[dict[str, object]] = []
+
+        def complete(self, *, request_body: bytes) -> str:
+            self.response = self.responses[self.calls]
+            return super().complete(request_body=request_body)
+
+    adapter = LocalSequenceAdapter()
+    with AnalysisSession() as session:
+        for index in range(20):
+            session.add_record(
+                NormalizedRecord(
+                    record_id=f"synthetic-{index:02d}",
+                    platform="google",
+                    category="app_installs",
+                    activity_type="app installs",
+                    title=f"Synthetic App {index:02d}",
+                    sources=(
+                        SourceReference(
+                            archive_id="synthetic-archive",
+                            internal_path="synthetic/apps.json",
+                            pointer=f"/{index}",
+                        ),
+                    ),
+                )
+            )
+        session.commit()
+        prepared = prepare_question(session, "summarize this", adapter)
+        background_prepared = prepare_question(
+            session,
+            "explain this export",
+            adapter,
+        )
+        payload = json.loads(prepared.payload)
+        record_ids = list(prepared.valid_record_ids)
+        adapter.responses = [
+            {
+                "claims": [
+                    {
+                        "text": f"Synthetic App {index:02d}",
+                        "kind": "inference",
+                        "record_ids": [record_ids[index]],
+                        "fact_ids": [],
+                    }
+                    for index in range(4)
+                ]
+            },
+            {
+                "claims": [
+                    {
+                        "text": f"Synthetic App {index + 4:02d}",
+                        "kind": "inference",
+                        "record_ids": [record_ids[index + 4]],
+                        "fact_ids": [],
+                    }
+                    for index in range(3)
+                ]
+            },
+        ]
+        answer = answer_question(prepared, adapter=adapter, allow_cloud=False)
+
+    assert prepared.query_operation.value == "archive_overview"
+    assert background_prepared.interpretive
+    assert background_prepared.recovery_answer is not None
+    assert background_prepared.recovery_answer.claims[0].text.startswith("You're looking at")
+    assert prepared.preview.record_count == 12
+    assert len(payload["evidence_records"]) == 12
+    assert adapter.calls == 2
+    assert answer.claims[0].kind.value == "calculated"
+    assert answer.claims[0].text == "The selected export contains 20 supported records."
+    assert adapter.answer_schema is not None
+    assert adapter.answer_schema["properties"]["claims"]["minItems"] == 2
+    assert adapter.answer_schema["properties"]["claims"]["maxItems"] == 4
 
 
 def test_calculated_claim_requires_fact_evidence(google_export: Path) -> None:
@@ -462,7 +545,7 @@ def test_no_match_question_is_answered_locally_without_archive_facts(
     assert decoded["evidence_records"] == []
     assert len(decoded["calculated_facts"]) == 1
     assert decoded["calculated_facts"][0]["scope"] == "matching"
-    assert decoded["calculated_facts"][0]["value"] == 0
+    assert "0" in decoded["calculated_facts"][0]["meaning"]
     answer = answer_question(prepared, adapter=adapter, allow_cloud=False)
     assert answer.claims[0].text == "No matching records were found for this question."
     assert adapter.calls == 0

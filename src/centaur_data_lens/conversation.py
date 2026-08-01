@@ -22,6 +22,11 @@ from centaur_data_lens.query import build_query_plan, compile_query, date_from_q
 _MAX_REFERENCE_IDS = 100
 _MAX_CONTEXT_TURNS = 8
 _MAX_CONTEXT_QUESTION_CHARS = 1_000
+_CONTEXT_REFERENCE_RE = re.compile(
+    r"\b(?:this|that|those|it|previous|above)\b|"
+    r"\bwhat (?:you(?: are|'re| were|'ve been) )?(?:showing|showed) me\b",
+    re.IGNORECASE,
+)
 _FOLLOW_UP_PATTERNS = {
     "day": re.compile(r"\b(?:on )?that day\b", re.IGNORECASE),
     "facet": re.compile(
@@ -377,6 +382,14 @@ def resolve_turn(question: str, state: ConversationState) -> ResolvedTurn:
         )
 
     if _FOLLOW_UP_PATTERNS["interpretation"].search(normalized) and previous is not None:
+        return _repeat_plan(
+            normalized,
+            previous,
+            kind="previous_result",
+            value=previous.result.result_id,
+        )
+
+    if previous is not None and _CONTEXT_REFERENCE_RE.search(normalized):
         return _repeat_plan(
             normalized,
             previous,
