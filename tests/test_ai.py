@@ -345,6 +345,11 @@ def test_overview_payload_limits_examples_and_requires_aggregate_synthesis() -> 
             "explain this export",
             adapter,
         )
+        selection_prepared = prepare_question(
+            session,
+            "whats the most surprising item in there?",
+            adapter,
+        )
         payload = json.loads(prepared.payload)
         record_ids = list(prepared.valid_record_ids)
         adapter.responses = [
@@ -372,11 +377,42 @@ def test_overview_payload_limits_examples_and_requires_aggregate_synthesis() -> 
             },
         ]
         answer = answer_question(prepared, adapter=adapter, allow_cloud=False)
+        selection_adapter = LocalSequenceAdapter()
+        selected_record_id, selected_label = selection_prepared.record_labels[3]
+        selection_adapter.responses = [
+            {
+                "claims": [
+                    {
+                        "text": (
+                            f'Among the selected examples, "{selected_label}" is subjectively '
+                            "the most surprising."
+                        ),
+                        "kind": "inference",
+                        "record_ids": list(selection_prepared.valid_record_ids),
+                        "fact_ids": [],
+                    }
+                ]
+            }
+        ]
+        selection_answer = answer_question(
+            selection_prepared,
+            adapter=selection_adapter,
+            allow_cloud=False,
+        )
 
     assert prepared.query_operation.value == "archive_overview"
     assert background_prepared.interpretive
     assert background_prepared.recovery_answer is not None
     assert background_prepared.recovery_answer.claims[0].text.startswith("You're looking at")
+    assert selection_prepared.item_selection
+    assert selection_prepared.minimum_claims == 1
+    assert selection_prepared.maximum_claims == 2
+    assert selection_prepared.recovery_answer is not None
+    selection_claim = selection_prepared.recovery_answer.claims[0]
+    assert selection_claim.kind.value == "inference"
+    assert selection_claim.record_ids
+    assert "subjective" in selection_claim.text
+    assert selection_answer.claims[0].record_ids == [selected_record_id]
     assert prepared.preview.record_count == 12
     assert len(payload["evidence_records"]) == 12
     assert adapter.calls == 2

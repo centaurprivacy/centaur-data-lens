@@ -110,6 +110,13 @@ failure returns a locally constructed, citation-valid summary. Interpretive
 follow-ups have a separate recovery form explaining what records represent and
 what cannot safely be inferred.
 
+Ordinal and subjective follow-ups have distinct contracts. A request for the
+first item resolves the first bounded record ID from the immediately previous
+result and executes `RECORD_BY_ID`. A request for a surprising, unusual, or
+standout item re-runs the previous scope but enters item-selection mode: one or
+two claims, one normalized chosen-record citation, and an explicit statement
+that the judgment covers only the evidence examples selected for that turn.
+
 ## Ephemeral state
 
 Each process creates a random, user-only temporary directory carrying a marker.

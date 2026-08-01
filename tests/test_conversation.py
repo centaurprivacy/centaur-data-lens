@@ -107,6 +107,35 @@ def test_contextual_background_request_requeries_previous_scope(google_export) -
     assert background.context.referent_kind == "previous_result"
 
 
+def test_subjective_and_first_item_follow_ups_use_previous_result(google_export) -> None:
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        first = resolve_turn("show me a summary", ConversationState())
+        first_result = session.execute_query(first.plan)
+        state = ConversationState().after(first_result)
+        surprising = resolve_turn("whats the most surprising item in there?", state)
+        surprising_result = session.execute_query(surprising.plan)
+        state = state.after(surprising_result)
+        first_item = resolve_turn("whats the first item?", state)
+
+    assert surprising.plan.operation == QueryOperation.ARCHIVE_OVERVIEW
+    assert surprising.plan.scope == first.plan.scope
+    assert surprising.context is not None
+    assert surprising.context.referent_kind == "previous_result"
+    assert first_item.plan.operation == QueryOperation.RECORD_BY_ID
+    assert first_item.context is not None
+    assert first_item.context.referent_kind == "record"
+    assert state.previous_turn is not None
+    assert first_item.plan.scope.record_ids == (state.previous_turn.result.record_ids[0],)
+    assert first_item.plan.assumptions[0].code == "bounded_result_order"
+
+
+def test_first_item_without_previous_result_asks_for_clarification() -> None:
+    first_item = resolve_turn("whats the first item?", ConversationState())
+    assert first_item.plan.intent == QueryIntent.CLARIFICATION
+    assert first_item.plan.clarification is not None
+
+
 def test_interpretive_question_without_prior_result_uses_archive_overview() -> None:
     resolved = resolve_turn("what does this mean?", ConversationState())
     assert resolved.plan.intent == QueryIntent.ARCHIVE_OVERVIEW

@@ -42,6 +42,39 @@ class _LocalAdapter:
         payload = json.loads(request_body)
         fact_id = payload["calculated_facts"][0]["fact_id"]
         record_ids = [record["record_id"] for record in payload["evidence_records"][:1]]
+        lowered_question = payload["question"].lower()
+        if "surprising" in lowered_question:
+            return json.dumps(
+                {
+                    "claims": [
+                        {
+                            "text": (
+                                "Among the selected examples, this item is the most surprising "
+                                "to me; that choice is subjective."
+                            ),
+                            "kind": "inference",
+                            "record_ids": record_ids,
+                            "fact_ids": [],
+                        }
+                    ]
+                }
+            )
+        if "first item" in lowered_question:
+            return json.dumps(
+                {
+                    "claims": [
+                        {
+                            "text": (
+                                "This is the first record in the previous result's deterministic "
+                                "evidence order."
+                            ),
+                            "kind": "observed",
+                            "record_ids": record_ids,
+                            "fact_ids": [],
+                        }
+                    ]
+                }
+            )
         claims = [
             {
                 "text": "Synthetic cited answer.",
@@ -60,7 +93,7 @@ class _LocalAdapter:
                     "fact_ids": [fact_id],
                 }
             )
-        if "what does" in payload["question"].lower():
+        if "what does" in lowered_question:
             claims.append(
                 {
                     "text": "Synthetic interpretation.",
@@ -158,6 +191,40 @@ def test_chat_indexes_once_and_executes_a_fresh_plan_per_question(
         "Timezone disclosure: assuming America/Los_Angeles; UTC boundary checked" in result.stdout
     )
     assert "Temporary analysis was deleted" in result.stdout
+
+
+def test_chat_resolves_subjective_and_first_item_follow_ups(
+    monkeypatch: pytest.MonkeyPatch,
+    google_export: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    adapter = _LocalAdapter()
+    monkeypatch.setattr(
+        cli.questionary,
+        "text",
+        _prompt_from(
+            iter(
+                [
+                    "show me a summary",
+                    "whats the most surprising item in there?",
+                    "whats the first item?",
+                    ":exit",
+                ]
+            )
+        ),
+    )
+
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        cli._chat_loop(session, adapter=adapter, timezone="UTC")
+
+    payloads = [json.loads(request) for request in adapter.calls]
+    assert len(payloads) == 3
+    assert payloads[1]["query_plan"]["operation"] == "archive_overview"
+    assert payloads[2]["query_plan"]["operation"] == "record_by_id"
+    output = capsys.readouterr().out
+    assert "No matching records were found" not in output
+    assert "subjective" in output
 
 
 def test_chat_help_describes_ephemeral_requery_contract() -> None:

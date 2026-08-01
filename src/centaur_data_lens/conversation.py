@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field
 
 from centaur_data_lens.models import (
+    QueryAssumption,
     QueryIntent,
     QueryOperation,
     QueryPlan,
@@ -35,6 +36,16 @@ _FOLLOW_UP_PATTERNS = {
     ),
     "comparison": re.compile(r"\bcompare that with (?P<platform>google|meta)\b", re.IGNORECASE),
     "record": re.compile(r"\b(?:did|does) that record\b", re.IGNORECASE),
+    "first_record": re.compile(
+        r"\b(?:(?:what(?:'s| is)|whats) the |show me (?:the )?)first "
+        r"(?:item|record|entry)\b",
+        re.IGNORECASE,
+    ),
+    "subjective_selection": re.compile(
+        r"\b(?:surpris(?:e|ed|ing)|interesting|unusual|unexpected|notable|odd|weird|"
+        r"stands? out)\b",
+        re.IGNORECASE,
+    ),
     "previous": re.compile(
         r"\b(?:show|display)(?: me)? the previous result again\b",
         re.IGNORECASE,
@@ -371,6 +382,38 @@ def resolve_turn(question: str, state: ConversationState) -> ResolvedTurn:
             ),
         )
 
+    if _FOLLOW_UP_PATTERNS["first_record"].search(normalized):
+        record_id = (
+            previous.result.record_ids[0] if previous and previous.result.record_ids else None
+        )
+        if previous is None or record_id is None:
+            return _clarification(
+                normalized,
+                '"First item" needs a previous result containing at least one record.',
+            )
+        return ResolvedTurn(
+            plan=build_query_plan(
+                question=normalized,
+                intent=QueryIntent.RECORD_DETAIL,
+                operation=QueryOperation.RECORD_BY_ID,
+                scope=QueryScope(record_ids=(record_id,)),
+                assumptions=(
+                    QueryAssumption(
+                        code="bounded_result_order",
+                        message=(
+                            "Interpreted first item as the first record in the previous result's "
+                            "deterministic evidence order."
+                        ),
+                    ),
+                ),
+            ),
+            context=ResolvedContext(
+                previous_result_id=previous.result.result_id,
+                referent_kind="record",
+                referent_value=record_id,
+            ),
+        )
+
     if _FOLLOW_UP_PATTERNS["previous"].search(normalized):
         if previous is None:
             return _clarification(normalized, "There is no previous result in this session.")
@@ -382,6 +425,14 @@ def resolve_turn(question: str, state: ConversationState) -> ResolvedTurn:
         )
 
     if _FOLLOW_UP_PATTERNS["interpretation"].search(normalized) and previous is not None:
+        return _repeat_plan(
+            normalized,
+            previous,
+            kind="previous_result",
+            value=previous.result.result_id,
+        )
+
+    if _FOLLOW_UP_PATTERNS["subjective_selection"].search(normalized) and previous is not None:
         return _repeat_plan(
             normalized,
             previous,

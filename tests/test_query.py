@@ -202,6 +202,10 @@ def test_compiler_covers_all_allowlisted_plan_families() -> None:
             QueryIntent.ARCHIVE_OVERVIEW,
             QueryOperation.ARCHIVE_OVERVIEW,
         ),
+        "whats the most surprising item in there?": (
+            QueryIntent.ARCHIVE_OVERVIEW,
+            QueryOperation.ARCHIVE_OVERVIEW,
+        ),
         "what happened on July 20, 2026?": (
             QueryIntent.DATE_LOOKUP,
             QueryOperation.DATE_RANGE,

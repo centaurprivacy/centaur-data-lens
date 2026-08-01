@@ -46,7 +46,8 @@ _TEXT_LOOKUP_RE = re.compile(
     re.IGNORECASE,
 )
 _OPEN_ENDED_QUESTION_RE = re.compile(
-    r"^(?:what|why|how|is|are|do|does|did|can|could|should|would|tell|explain|describe)\b",
+    r"^(?:what|whats|why|how|is|are|do|does|did|can|could|should|would|tell|explain|"
+    r"describe)\b",
     re.IGNORECASE,
 )
 _MAX_TEXT_TERMS = 20

@@ -89,6 +89,13 @@ explanation rather than a repeated list. Local chat shows one compact analysis
 line per turn; the detailed immutable transmission preview remains mandatory for
 every cloud-backed turn.
 
+Contextual selections are handled separately from searches. Questions such as
+“what’s the most surprising item in there?” ask the model to choose and explain
+one cited record from the bounded evidence examples, while disclosing that the
+choice is subjective rather than an exhaustive archive-wide ranking. “What’s the
+first item?” deterministically resolves the first record from the previous result
+and runs a fresh record-detail query.
+
 Conversation memory contains up to eight recent typed plans, derived result IDs,
 bounded valid fact/record IDs, active scopes, timezone, and unambiguous referents.
 Those typed plans retain their user questions so later turns have useful context.
