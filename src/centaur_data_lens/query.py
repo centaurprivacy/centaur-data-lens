@@ -38,8 +38,28 @@ _DATE_RE = re.compile(
 )
 _ISO_DATE_RE = re.compile(r"\b(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})\b")
 _RECORD_ID_RE = re.compile(r"\b[0-9a-f]{24}\b", re.IGNORECASE)
+_TEXT_LOOKUP_RE = re.compile(
+    r"\b(?:find|look for|search for|show (?:me )?(?:records?|items?) (?:about|containing|"
+    r"matching)|(?:records?|items?) (?:about|containing|matching|mention(?:ing|s)?)|"
+    r"mentions? of)\b|"
+    r"\bwhat\b.{0,100}\b(?:searches?|records?|items?)\b.{0,40}\b(?:appear|match|mention)",
+    re.IGNORECASE,
+)
+_OPEN_ENDED_QUESTION_RE = re.compile(
+    r"^(?:what|whats|why|how|is|are|do|does|did|can|could|should|would|tell|explain|"
+    r"describe)\b",
+    re.IGNORECASE,
+)
 _MAX_TEXT_TERMS = 20
 _MAX_RECORD_IDS = 100
+_OVERVIEW_PROFILE_FIELDS = (
+    "activity_type",
+    "service",
+    "device",
+    "hostname",
+    "title",
+    "timestamp",
+)
 _GENERIC_PRODUCTS = frozenset({"takeout", "your_facebook_activity"})
 _TRANSMITTABLE_EXTENSIONS = frozenset(
     {".csv", ".html", ".jpeg", ".jpg", ".json", ".mp4", ".png", ".txt", ".xml", ".zip"}
@@ -271,7 +291,9 @@ def _timezone_name(value: str | tzinfo | None) -> tuple[str, tzinfo]:
     return str(local), local
 
 
-def _date_from_question(question: str) -> date | None:
+def date_from_question(question: str) -> date | None:
+    """Extract the explicit calendar date accepted by the local compiler."""
+
     match = _DATE_RE.search(question)
     if match:
         raw = f"{match['month']} {match['day']} {match['year']}"
@@ -332,6 +354,27 @@ def _plan(
     )
 
 
+def build_query_plan(
+    *,
+    question: str,
+    intent: QueryIntent,
+    operation: QueryOperation,
+    scope: QueryScope | None = None,
+    assumptions: tuple[QueryAssumption, ...] = (),
+    clarification: str | None = None,
+) -> QueryPlan:
+    """Build a validated deterministic plan for trusted local orchestration."""
+
+    return _plan(
+        question=" ".join(question.strip().split()),
+        intent=intent,
+        operation=operation,
+        scope=scope,
+        assumptions=assumptions,
+        clarification=clarification,
+    )
+
+
 def compile_query(question: str, *, timezone: str | tzinfo | None = None) -> QueryPlan:
     """Compile allowlisted common question forms without a model or network call."""
 
@@ -354,7 +397,7 @@ def compile_query(question: str, *, timezone: str | tzinfo | None = None) -> Que
             scope=QueryScope(record_ids=explicit_ids),
         )
 
-    requested_date = _date_from_question(normalized)
+    requested_date = date_from_question(normalized)
     if requested_date is not None:
         timezone_name, timezone_value = _timezone_name(timezone)
         local_start = datetime.combine(requested_date, time.min, tzinfo=timezone_value)
@@ -382,7 +425,18 @@ def compile_query(question: str, *, timezone: str | tzinfo | None = None) -> Que
             clarification="Provide a valid calendar date, including a four-digit year.",
         )
 
-    if any(phrase in lowered for phrase in ("over time", "trend", "change over")):
+    if any(
+        phrase in lowered
+        for phrase in (
+            "over time",
+            "change over",
+            "by month",
+            "month by month",
+            "timeline",
+            "temporal trend",
+            "time trend",
+        )
+    ):
         return _plan(
             question=normalized,
             intent=QueryIntent.TREND,
@@ -441,7 +495,50 @@ def compile_query(question: str, *, timezone: str | tzinfo | None = None) -> Que
                 scope=QueryScope(facet=facet),
             )
 
-    if any(phrase in lowered for phrase in ("summarize", "summarise", "overview", "summary")):
+    if any(
+        phrase in lowered
+        for phrase in (
+            "summarize",
+            "summarise",
+            "overview",
+            "summary",
+            "how many records",
+            "number of records",
+            "record count",
+            "how much data",
+            "show me data",
+            "tell me about my data",
+            "what is here",
+            "some trends",
+            "any trends",
+            "interesting trends",
+            "notable trends",
+            "some patterns",
+            "any patterns",
+            "interesting patterns",
+            "notable patterns",
+        )
+    ):
+        return _plan(
+            question=normalized,
+            intent=QueryIntent.ARCHIVE_OVERVIEW,
+            operation=QueryOperation.ARCHIVE_OVERVIEW,
+        )
+
+    if any(
+        phrase in lowered
+        for phrase in (
+            "what does this mean",
+            "what does this data mean",
+            "what should i know",
+            "what should i be concerned about",
+            "should i be concerned",
+            "what does this data say about me",
+            "explain this export",
+            "privacy implications",
+            "privacy risks",
+        )
+    ):
         return _plan(
             question=normalized,
             intent=QueryIntent.ARCHIVE_OVERVIEW,
@@ -459,7 +556,7 @@ def compile_query(question: str, *, timezone: str | tzinfo | None = None) -> Que
             ),
         )
 
-    if lowered in {"show me data", "tell me about my data", "help", "what is here"}:
+    if lowered == "help":
         return _plan(
             question=normalized,
             intent=QueryIntent.CLARIFICATION,
@@ -482,27 +579,19 @@ def compile_query(question: str, *, timezone: str | tzinfo | None = None) -> Que
             ),
         )
     terms = _text_terms(normalized)
-    if terms:
+    if terms and (
+        _TEXT_LOOKUP_RE.search(normalized) or not _OPEN_ENDED_QUESTION_RE.search(normalized)
+    ):
         return _plan(
             question=normalized,
             intent=QueryIntent.FULL_TEXT,
             operation=QueryOperation.FULL_TEXT_MATCH,
             scope=QueryScope(text_terms=terms),
         )
-    if lowered in {"what happened?", "what happened", "what might this mean?"}:
-        return _plan(
-            question=normalized,
-            intent=QueryIntent.ARCHIVE_OVERVIEW,
-            operation=QueryOperation.ARCHIVE_OVERVIEW,
-        )
     return _plan(
         question=normalized,
-        intent=QueryIntent.UNSUPPORTED,
-        operation=QueryOperation.COVERAGE_ONLY,
-        clarification=(
-            "This local compiler does not support that question form. Try an overview, date, "
-            "facet, trend, platform comparison, text lookup, or explicit record ID."
-        ),
+        intent=QueryIntent.ARCHIVE_OVERVIEW,
+        operation=QueryOperation.ARCHIVE_OVERVIEW,
     )
 
 
@@ -847,9 +936,9 @@ def execute_query(
                 scope_definition="all_supported_records",
                 metric="record_count",
                 value=total,
-            ),
-            *_manifest_facts(plan, manifest),
+            )
         ]
+        manifest_facts = _manifest_facts(plan, manifest)
         rows = connection.execute(
             """
             SELECT platform, category, COUNT(*), MIN(timestamp), MAX(timestamp)
@@ -882,6 +971,40 @@ def execute_query(
                             dimensions=dimensions,
                         )
                     )
+        if total:
+            for field in _OVERVIEW_PROFILE_FIELDS:
+                present, distinct = connection.execute(
+                    f"SELECT COUNT({field}), COUNT(DISTINCT {field}) FROM records"  # noqa: S608
+                ).fetchone()
+                facts.extend(
+                    (
+                        _fact(
+                            plan=plan,
+                            scope="archive",
+                            scope_definition="all_supported_records",
+                            metric="value_present_count",
+                            value=int(present),
+                            dimensions={"field": field},
+                        ),
+                        _fact(
+                            plan=plan,
+                            scope="archive",
+                            scope_definition="all_supported_records",
+                            metric="value_missing_count",
+                            value=total - int(present),
+                            dimensions={"field": field},
+                        ),
+                        _fact(
+                            plan=plan,
+                            scope="archive",
+                            scope_definition="all_supported_records",
+                            metric="distinct_value_count",
+                            value=int(distinct),
+                            dimensions={"field": field},
+                        ),
+                    )
+                )
+        facts.extend(manifest_facts)
         candidates = _record_rows(connection, limit=candidate_limit)
         overview_notes: tuple[CoverageNote, ...] = ()
         status = QueryStatus.OK

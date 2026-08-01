@@ -77,6 +77,8 @@ def assert_answer_schema(schema: object) -> None:
     assert isinstance(properties, dict)
     claims = properties["claims"]
     assert isinstance(claims, dict)
+    assert claims["minItems"] == 1
+    assert claims["maxItems"] == 8
     item = claims["items"]
     assert isinstance(item, dict)
     variant_properties = item["properties"]
@@ -153,6 +155,9 @@ def test_context_is_bounded_and_preview_is_explicit(google_export: Path) -> None
     request = json.loads(prepared.request_body)
     assert request["user"] == payload
     assert "untrusted data" in request["system"]
+    assert "conversational language" in request["system"]
+    assert "Do not emit one" in request["system"]
+    assert "claim per record" in request["system"]
     assert_answer_schema(request["schema"])
     rendered_schema = json.dumps(request["schema"])
     assert all(fact_id not in rendered_schema for fact_id in prepared.valid_fact_ids)
@@ -165,11 +170,15 @@ def test_context_is_bounded_and_preview_is_explicit(google_export: Path) -> None
     assert preview.will_transmit
     assert "request.system_prompt" in preview.transmitted_fields
     assert "request.structured_output_schema" in preview.transmitted_fields
+    assert "calculated_facts.meaning" in preview.transmitted_fields
     assert "privacy tools" in payload
     decoded = json.loads(payload)
     assert decoded["scope"]["total_records"] == 5
+    assert "query_plan" not in decoded
+    assert "conversation_context" not in decoded
     assert decoded["scope"]["matching_records"] == 1
     assert decoded["calculated_facts"]
+    assert all("meaning" in fact for fact in decoded["calculated_facts"])
     assert decoded["evidence_records"]
     assert "source_references" not in payload
     assert "source_ids" not in payload
@@ -276,6 +285,144 @@ def test_rejects_answer_without_validated_claims(google_export: Path) -> None:
             )
 
 
+def test_rejects_fragmented_answer_with_too_many_claims(google_export: Path) -> None:
+    adapter = FakeAdapter({"claims": []})
+    with AnalysisSession() as session:
+        analyze_sources(session, [SourceSpec("google", google_export)])
+        prepared = prepare_question(session, "summarize this export", adapter)
+        fact_id = next(iter(prepared.valid_fact_ids))
+        adapter.response = {
+            "claims": [
+                {
+                    "text": f"Fragment {index}",
+                    "kind": "calculated",
+                    "record_ids": [],
+                    "fact_ids": [fact_id],
+                }
+                for index in range(9)
+            ]
+        }
+        with pytest.raises(ModelAdapterError, match="invalid structured answer"):
+            answer_question(prepared, adapter=adapter, allow_cloud=True)
+
+
+def test_overview_payload_limits_examples_and_requires_aggregate_synthesis() -> None:
+    class LocalSequenceAdapter(FakeAdapter):
+        destination = "http://127.0.0.1:11434"
+        is_local = True
+
+        def __init__(self) -> None:
+            super().__init__({"claims": []})
+            self.responses: list[dict[str, object]] = []
+
+        def complete(self, *, request_body: bytes) -> str:
+            self.response = self.responses[self.calls]
+            return super().complete(request_body=request_body)
+
+    adapter = LocalSequenceAdapter()
+    with AnalysisSession() as session:
+        for index in range(20):
+            session.add_record(
+                NormalizedRecord(
+                    record_id=f"synthetic-{index:02d}",
+                    platform="google",
+                    category="app_installs",
+                    activity_type="app installs",
+                    title=f"Synthetic App {index:02d}",
+                    sources=(
+                        SourceReference(
+                            archive_id="synthetic-archive",
+                            internal_path="synthetic/apps.json",
+                            pointer=f"/{index}",
+                        ),
+                    ),
+                )
+            )
+        session.commit()
+        prepared = prepare_question(session, "summarize this", adapter)
+        background_prepared = prepare_question(
+            session,
+            "explain this export",
+            adapter,
+        )
+        selection_prepared = prepare_question(
+            session,
+            "whats the most surprising item in there?",
+            adapter,
+        )
+        payload = json.loads(prepared.payload)
+        record_ids = list(prepared.valid_record_ids)
+        adapter.responses = [
+            {
+                "claims": [
+                    {
+                        "text": f"Synthetic App {index:02d}",
+                        "kind": "inference",
+                        "record_ids": [record_ids[index]],
+                        "fact_ids": [],
+                    }
+                    for index in range(4)
+                ]
+            },
+            {
+                "claims": [
+                    {
+                        "text": f"Synthetic App {index + 4:02d}",
+                        "kind": "inference",
+                        "record_ids": [record_ids[index + 4]],
+                        "fact_ids": [],
+                    }
+                    for index in range(3)
+                ]
+            },
+        ]
+        answer = answer_question(prepared, adapter=adapter, allow_cloud=False)
+        selection_adapter = LocalSequenceAdapter()
+        selected_record_id, selected_label = selection_prepared.record_labels[3]
+        selection_adapter.responses = [
+            {
+                "claims": [
+                    {
+                        "text": (
+                            f'Among the selected examples, "{selected_label}" is subjectively '
+                            "the most surprising."
+                        ),
+                        "kind": "inference",
+                        "record_ids": list(selection_prepared.valid_record_ids),
+                        "fact_ids": [],
+                    }
+                ]
+            }
+        ]
+        selection_answer = answer_question(
+            selection_prepared,
+            adapter=selection_adapter,
+            allow_cloud=False,
+        )
+
+    assert prepared.query_operation.value == "archive_overview"
+    assert background_prepared.interpretive
+    assert background_prepared.recovery_answer is not None
+    assert background_prepared.recovery_answer.claims[0].text.startswith("You're looking at")
+    assert selection_prepared.item_selection
+    assert selection_prepared.minimum_claims == 1
+    assert selection_prepared.maximum_claims == 2
+    assert selection_prepared.recovery_answer is not None
+    selection_claim = selection_prepared.recovery_answer.claims[0]
+    assert selection_claim.kind.value == "inference"
+    assert selection_claim.record_ids
+    assert "subjective" in selection_claim.text
+    assert selection_answer.claims[0].record_ids == [selected_record_id]
+    assert prepared.preview.record_count == 12
+    assert len(payload["evidence_records"]) == 12
+    assert adapter.calls == 2
+    assert answer.claims[0].kind.value == "calculated"
+    assert answer.claims[0].text == "The selected export contains 20 supported records."
+    assert adapter.answer_schema is not None
+    assert adapter.answer_schema["properties"]["claims"]["minItems"] == 2
+    assert adapter.answer_schema["properties"]["claims"]["maxItems"] == 4
+
+
 def test_calculated_claim_requires_fact_evidence(google_export: Path) -> None:
     with AnalysisSession() as session:
         analyze_sources(session, [SourceSpec("google", google_export)])
@@ -334,7 +481,7 @@ def test_local_model_retries_one_invalid_citation_contract(google_export: Path) 
                 "claims": [
                     {
                         "text": "Corrected evidence type.",
-                        "kind": "inference",
+                        "kind": "observed",
                         "record_ids": [record_id],
                         "fact_ids": [],
                     }
@@ -343,7 +490,7 @@ def test_local_model_retries_one_invalid_citation_contract(google_export: Path) 
         ]
         answer = answer_question(prepared, adapter=adapter, allow_cloud=False)
     assert adapter.calls == 2
-    assert answer.claims[0].kind.value == "inference"
+    assert answer.claims[0].kind.value == "observed"
     assert adapter.answer_schema is not None
     properties = adapter.answer_schema["properties"]
     assert isinstance(properties, dict)
@@ -355,7 +502,7 @@ def test_local_model_retries_one_invalid_citation_contract(google_export: Path) 
     assert isinstance(claim_properties, dict)
     kind = claim_properties["kind"]
     assert isinstance(kind, dict)
-    assert kind["enum"] == ["inference"]
+    assert kind["enum"] == ["observed", "calculated", "inference"]
     record_ids = claim_properties["record_ids"]
     assert isinstance(record_ids, dict)
     record_items = record_ids["items"]
@@ -434,7 +581,7 @@ def test_no_match_question_is_answered_locally_without_archive_facts(
     assert decoded["evidence_records"] == []
     assert len(decoded["calculated_facts"]) == 1
     assert decoded["calculated_facts"][0]["scope"] == "matching"
-    assert decoded["calculated_facts"][0]["value"] == 0
+    assert "0" in decoded["calculated_facts"][0]["meaning"]
     answer = answer_question(prepared, adapter=adapter, allow_cloud=False)
     assert answer.claims[0].text == "No matching records were found for this question."
     assert adapter.calls == 0

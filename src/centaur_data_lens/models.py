@@ -322,7 +322,7 @@ class AIClaim(BaseModel):
 class AIAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    claims: list[AIClaim] = Field(max_length=50)
+    claims: list[AIClaim] = Field(max_length=8)
 
 
 JsonObject = dict[str, Any]

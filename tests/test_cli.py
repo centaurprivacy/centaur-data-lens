@@ -341,7 +341,7 @@ def test_cloud_no_match_is_answered_locally_without_confirmation(
     assert "No matching records were found" in output
 
 
-def test_ask_once_prints_every_citation_before_long_claim_text(
+def test_ask_once_prints_conversational_text_before_every_citation(
     monkeypatch: pytest.MonkeyPatch,
     google_export: Path,
     capsys: pytest.CaptureFixture[str],
@@ -369,7 +369,12 @@ def test_ask_once_prints_every_citation_before_long_claim_text(
                     AIClaim(
                         text="x" * 3_000,
                         kind=AIClaimKind.INFERENCE,
-                        record_ids=["first-record"],
+                        record_ids=[
+                            "first-record",
+                            "second-supporting-record",
+                            "third-supporting-record",
+                            "fourth-supporting-record",
+                        ],
                     ),
                     AIClaim(
                         text="Second claim",
@@ -391,9 +396,13 @@ def test_ask_once_prints_every_citation_before_long_claim_text(
     lines = output.splitlines()
     first_citation_line = next(index for index, line in enumerate(lines) if "first-record" in line)
     first_text_line = next(index for index, line in enumerate(lines) if set(line) == {"x"})
-    assert first_citation_line < first_text_line
+    assert first_text_line < first_citation_line
     assert output.count("x") >= 3_000
-    assert output.index("second-record") < output.index("Second claim")
+    assert output.index("Second claim") < output.index("second-record")
+    assert "Evidence (inference)" in output
+    assert "Evidence (observed)" in output
+    assert "(+1 more)" in output
+    assert "fourth-supporting-record" not in output
 
 
 def test_select_paths_uses_explicit_platform(monkeypatch, google_export: Path) -> None:

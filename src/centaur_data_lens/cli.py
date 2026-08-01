@@ -14,6 +14,7 @@ from rich.text import Text
 
 from centaur_data_lens import __version__
 from centaur_data_lens.ai import (
+    ModelAdapter,
     TransmissionPreview,
     answer_question,
     create_adapter,
@@ -25,7 +26,9 @@ from centaur_data_lens.analysis import (
     analyze_sources,
     parse_source_values,
 )
+from centaur_data_lens.conversation import ConversationState, resolve_turn
 from centaur_data_lens.errors import DataLensError, ModelAdapterError
+from centaur_data_lens.models import AIAnswer, QueryResult, QueryStatus
 from centaur_data_lens.platforms import get_platform, list_platforms
 from centaur_data_lens.reports import write_report
 from centaur_data_lens.security import sanitize_terminal, secure_write_text
@@ -187,10 +190,69 @@ def _print_preview(preview: TransmissionPreview) -> None:
     _safe_print(f"Transmitted fields: {', '.join(preview.transmitted_fields)}", limit=8_000)
     _safe_print(f"Detected sensitivity classes: {', '.join(preview.sensitivity_classes) or 'none'}")
     _safe_print(
+        "Conversation-state fields included: "
+        f"{', '.join(preview.conversation_state_fields) or 'none'}",
+        limit=8_000,
+    )
+    _safe_print(f"Timezone assumption: {preview.timezone_assumption or 'none'}")
+    _safe_print(
+        f"Scope assumptions: {'; '.join(preview.scope_assumptions) or 'none'}",
+        limit=8_000,
+    )
+    _safe_print(
         "Excluded: complete archive files, media, unsupported categories, source paths, "
         "archive identifiers, filenames, and API key",
         limit=4_000,
     )
+
+
+def _print_answer(answer: AIAnswer) -> None:
+    console.print()
+    for index, claim in enumerate(answer.claims):
+        _safe_print(claim.text, limit=4_000)
+        references: list[str] = []
+        if claim.fact_ids:
+            references.append(_compact_citations("facts", claim.fact_ids))
+        if claim.record_ids:
+            references.append(_compact_citations("records", claim.record_ids))
+        _safe_print(
+            f"Evidence ({claim.kind.value}) — {'; '.join(references)}",
+            style="dim",
+            limit=8_000,
+        )
+        if index < len(answer.claims) - 1:
+            console.print()
+
+
+def _compact_citations(label: str, identifiers: list[str]) -> str:
+    visible = identifiers[:3]
+    suffix = f" (+{len(identifiers) - len(visible)} more)" if len(identifiers) > 3 else ""
+    return f"{label}: {', '.join(visible)}{suffix}"
+
+
+def _print_local_turn_summary(preview: TransmissionPreview) -> None:
+    _safe_print(
+        f"Local analysis: {preview.total_records:,} records; "
+        f"{preview.matching_records:,} matched; {preview.fact_count} facts; "
+        f"{preview.record_count} evidence examples.",
+        style="dim",
+    )
+
+
+def _print_query_context(result: QueryResult) -> None:
+    if result.status != QueryStatus.OK:
+        _safe_print(f"Result status: {result.status.value}", style="bold")
+    scope = result.plan.scope
+    if scope.timezone and scope.start_utc and scope.end_utc:
+        _safe_print(
+            f"Timezone disclosure: assuming {scope.timezone}; UTC boundary checked "
+            f"from {scope.start_utc.isoformat()} to {scope.end_utc.isoformat()}.",
+            style="yellow",
+        )
+    for assumption in result.assumptions:
+        _safe_print(f"Assumption: {assumption.message}", style="yellow")
+    for note in result.coverage_notes:
+        _safe_print(f"Coverage limitation: {note.message}", style="yellow")
 
 
 def _ask_once(
@@ -229,15 +291,147 @@ def _ask_once(
         adapter=adapter,
         allow_cloud=confirmed,
     )
-    console.print()
-    for claim in answer.claims:
-        references: list[str] = []
-        if claim.fact_ids:
-            references.append(f"facts: {', '.join(claim.fact_ids)}")
-        if claim.record_ids:
-            references.append(f"records: {', '.join(claim.record_ids)}")
-        _safe_print(f"[{claim.kind.value}] {'; '.join(references)}", style="bold", limit=8_000)
-        _safe_print(claim.text, limit=4_000)
+    _print_answer(answer)
+
+
+def _print_chat_help() -> None:
+    _safe_print("Chat commands", style="bold")
+    for command, description in (
+        (":help", "Show this command list."),
+        (":coverage", "Show selected-export coverage and omissions."),
+        (":scope", "Show the active deterministic follow-up scope."),
+        (":timezone [ZONE]", "Show or set the IANA timezone; setting it resets chat context."),
+        (":reset", "Forget all retained turn context."),
+        (":exit", "Exit and delete the temporary analysis."),
+    ):
+        _safe_print(f"  {command:<20} {description}")
+
+
+def _print_chat_scope(state: ConversationState) -> None:
+    previous = state.previous_turn
+    if previous is None:
+        _safe_print("Active scope: none", style="dim")
+        return
+    scope = previous.scope
+    _safe_print(f"Previous plan: {previous.plan.plan_id}")
+    _safe_print(f"Previous result: {previous.result.result_id}")
+    _safe_print(f"Platforms: {', '.join(scope.platforms) or 'all selected'}")
+    _safe_print(f"Categories: {', '.join(scope.categories) or 'all supported'}")
+    _safe_print(f"Facet: {scope.facet or 'none'}")
+    if scope.start_utc and scope.end_utc:
+        _safe_print(f"UTC range: {scope.start_utc.isoformat()} to {scope.end_utc.isoformat()}")
+    _safe_print(f"Timezone: {scope.timezone or state.timezone or 'system default'}")
+
+
+def _handle_chat_command(
+    command: str,
+    *,
+    state: ConversationState,
+    session: AnalysisSession,
+) -> tuple[ConversationState, bool]:
+    name, _, argument = command.partition(" ")
+    normalized = name.lower()
+    if normalized == ":help":
+        _print_chat_help()
+    elif normalized == ":coverage":
+        _print_coverage_and_omissions(session)
+    elif normalized == ":scope":
+        _print_chat_scope(state)
+    elif normalized == ":timezone":
+        timezone = argument.strip()
+        if not timezone:
+            _safe_print(f"Timezone: {state.timezone or 'system default'}")
+        else:
+            try:
+                state = state.with_timezone(timezone)
+            except ValueError as exc:
+                _safe_print(str(exc), style="red")
+            else:
+                _safe_print(f"Timezone set to {timezone}; retained chat context was reset.")
+    elif normalized == ":reset":
+        state = state.reset()
+        _safe_print("Retained chat context reset.")
+    elif normalized == ":exit":
+        return state, False
+    else:
+        _safe_print("Unknown command. Use :help.", style="yellow")
+    return state, True
+
+
+def _chat_turn(
+    session: AnalysisSession,
+    *,
+    state: ConversationState,
+    question: str,
+    adapter: ModelAdapter,
+) -> ConversationState:
+    resolved = resolve_turn(question, state)
+    result = session.execute_query(resolved.plan)
+    prepared = prepare_question(
+        result,
+        adapter,
+        conversation_context=state.model_context(resolved.context),
+        include_query_plan=True,
+    )
+    if adapter.is_local:
+        _print_local_turn_summary(prepared.preview)
+    else:
+        _print_preview(prepared.preview)
+    _print_query_context(result)
+    confirmed = adapter.is_local or not prepared.preview.will_transmit
+    if not confirmed:
+        console.print(
+            Text(
+                "Warning: this turn's question, calculated facts, selected records, and "
+                "listed conversation-state fields may contain personal data. The cloud "
+                "provider may retain or process them under its terms.",
+                style="bold red",
+            )
+        )
+        response = questionary.text("Type SEND PERSONAL DATA to authorize this turn:").ask()
+        confirmed = response == "SEND PERSONAL DATA"
+    if not confirmed:
+        _safe_print("Cloud request cancelled; consent was not retained.", style="yellow")
+        return state
+    answer = answer_question(prepared, adapter=adapter, allow_cloud=confirmed)
+    _print_answer(answer)
+    return state.after(result)
+
+
+def _chat_loop(
+    session: AnalysisSession,
+    *,
+    adapter: ModelAdapter,
+    timezone: str | None,
+) -> None:
+    state = ConversationState(timezone=timezone)
+    _safe_print(
+        "Ephemeral chat ready. Each turn runs a fresh local query; use :help for commands.",
+        style="green",
+    )
+    while True:
+        question = questionary.text("> ").ask()
+        if question is None:
+            _safe_print("End of input. Temporary analysis will be deleted.", style="yellow")
+            return
+        normalized = str(question).strip()
+        if not normalized:
+            continue
+        if normalized.startswith(":"):
+            state, keep_running = _handle_chat_command(
+                normalized,
+                state=state,
+                session=session,
+            )
+            if not keep_running:
+                return
+            continue
+        state = _chat_turn(
+            session,
+            state=state,
+            question=normalized,
+            adapter=adapter,
+        )
 
 
 def _select_paths(platform_id: str) -> list[SourceSpec]:
@@ -526,6 +720,49 @@ def ask_command(
             )
     except DataLensError as exc:
         _fail(exc)
+
+
+@app.command("chat")
+def chat_command(
+    source: Annotated[
+        list[str], typer.Option("--source", help="Repeat PLATFORM=PATH for each export")
+    ],
+    provider: Annotated[str, typer.Option("--provider")],
+    model: Annotated[str | None, typer.Option("--model")] = None,
+    endpoint: Annotated[str | None, typer.Option("--endpoint")] = None,
+    timezone: Annotated[
+        str | None,
+        typer.Option(
+            "--timezone",
+            help="IANA timezone for calendar-date questions (for example America/Los_Angeles).",
+        ),
+    ] = None,
+    allow_large_archive: Annotated[bool, typer.Option("--allow-large-archive")] = False,
+) -> None:
+    """Start an ephemeral chat that re-queries the selected exports for every turn."""
+    try:
+        specs = parse_source_values(source)
+        if timezone is not None:
+            ConversationState().with_timezone(timezone)
+        with AnalysisSession() as session:
+            analyze_sources(
+                session,
+                specs,
+                allow_large_archive=allow_large_archive,
+                progress=_progress,
+            )
+            adapter = create_adapter(
+                provider,
+                model=model,
+                endpoint=endpoint,
+                prompt_for_key=True,
+            )
+            _chat_loop(session, adapter=adapter, timezone=timezone)
+        _safe_print("Chat ended. Temporary analysis was deleted.", style="green")
+    except (KeyboardInterrupt, EOFError):
+        _safe_print("Cancelled. Temporary analysis was deleted.", style="yellow")
+    except (DataLensError, ValueError) as exc:
+        _fail(DataLensError(str(exc)))
 
 
 @app.command("diagnostics")

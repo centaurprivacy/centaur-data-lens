@@ -357,7 +357,7 @@ def test_invalid_object_and_scalar_json_are_rejected(tmp_path: Path) -> None:
 def test_query_compiler_and_manifest_edges(monkeypatch: pytest.MonkeyPatch) -> None:
     assert compile_query("").operation == QueryOperation.COVERAGE_ONLY
     assert compile_query("compare things").intent == QueryIntent.CLARIFICATION
-    assert compile_query("what happened?!").intent == QueryIntent.UNSUPPORTED
+    assert compile_query("what happened?!").intent == QueryIntent.ARCHIVE_OVERVIEW
     assert compile_query("show records from 2025-02-30").intent == QueryIntent.CLARIFICATION
     with pytest.raises(ValueError, match="Unknown timezone"):
         compile_query("show records from 2025-01-01", timezone="Synthetic/Nowhere")

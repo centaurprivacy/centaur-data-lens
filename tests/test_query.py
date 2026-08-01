@@ -190,6 +190,22 @@ def test_compiler_covers_all_allowlisted_plan_families() -> None:
             QueryIntent.ARCHIVE_OVERVIEW,
             QueryOperation.ARCHIVE_OVERVIEW,
         ),
+        "how many records are there?": (
+            QueryIntent.ARCHIVE_OVERVIEW,
+            QueryOperation.ARCHIVE_OVERVIEW,
+        ),
+        "tell me some trends": (
+            QueryIntent.ARCHIVE_OVERVIEW,
+            QueryOperation.ARCHIVE_OVERVIEW,
+        ),
+        "what stands out in my data?": (
+            QueryIntent.ARCHIVE_OVERVIEW,
+            QueryOperation.ARCHIVE_OVERVIEW,
+        ),
+        "whats the most surprising item in there?": (
+            QueryIntent.ARCHIVE_OVERVIEW,
+            QueryOperation.ARCHIVE_OVERVIEW,
+        ),
         "what happened on July 20, 2026?": (
             QueryIntent.DATE_LOOKUP,
             QueryOperation.DATE_RANGE,
@@ -220,7 +236,6 @@ def test_compiler_covers_all_allowlisted_plan_families() -> None:
     for question, expected in cases.items():
         plan = compile_query(question, timezone="America/Los_Angeles")
         assert (plan.intent, plan.operation) == expected
-
     assert compile_query("which devices are present?").scope.facet == QueryFacet.DEVICE
     assert compile_query("what services appear most often?").scope.facet == QueryFacet.SERVICE
     assert compile_query("which activity types are present?").scope.facet == (
@@ -228,6 +243,41 @@ def test_compiler_covers_all_allowlisted_plan_families() -> None:
     )
     invalid_date = compile_query("what happened on July 99, 2026?")
     assert invalid_date.intent == QueryIntent.CLARIFICATION
+
+
+def test_vague_patterns_use_overview_but_explicit_time_trends_require_timestamps() -> None:
+    with AnalysisSession() as session:
+        session.add_record(_record("000000000000000000000001", timestamp=None))
+        session.commit()
+        count = session.query("how many records are there?")
+        patterns = session.query("tell me some trends")
+        temporal = session.query("show activity over time")
+
+    assert count.status == QueryStatus.OK
+    assert count.matching_records == 1
+    assert any(
+        fact.metric == "record_count"
+        and fact.scope == "archive"
+        and fact.dimensions == {}
+        and fact.value == 1
+        for fact in count.facts
+    )
+    assert patterns.status == QueryStatus.OK
+    assert patterns.plan.operation == QueryOperation.ARCHIVE_OVERVIEW
+    assert any(
+        fact.metric == "value_missing_count"
+        and fact.dimensions == {"field": "timestamp"}
+        and fact.value == 1
+        for fact in patterns.facts
+    )
+    assert any(
+        fact.metric == "distinct_value_count"
+        and fact.dimensions == {"field": "title"}
+        and fact.value == 1
+        for fact in patterns.facts
+    )
+    assert temporal.status == QueryStatus.MATCHING_DATA_ABSENT
+    assert temporal.plan.operation == QueryOperation.TIME_BUCKETS
 
 
 @pytest.mark.parametrize(
@@ -470,14 +520,14 @@ def test_ambiguous_unsupported_and_absence_statuses_are_distinct() -> None:
         missing_facet = session.query("which devices are present?")
         missing_category = session.query("what did I search for?")
         unsupported_product = session.query("compare Google and Meta")
-        ambiguous = session.query("show me data")
+        conversational = session.query("show me data")
         unsupported = session.query("explain causality between every event")
 
     assert missing_facet.status == QueryStatus.MATCHING_DATA_ABSENT
     assert missing_category.status == QueryStatus.NOT_PRESENT
     assert unsupported_product.status == QueryStatus.PRODUCT_UNSUPPORTED
-    assert ambiguous.status == QueryStatus.CLARIFICATION_REQUIRED
-    assert ambiguous.message
+    assert conversational.status == QueryStatus.OK
+    assert conversational.plan.operation == QueryOperation.ARCHIVE_OVERVIEW
     assert unsupported.status == QueryStatus.UNSUPPORTED
     assert unsupported.message
 
